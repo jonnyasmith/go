@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -32,17 +31,22 @@ type snapshotFile struct {
 }
 
 func (store *Store) startSnapshot() bool {
-	if store.stats.evictions.Load() != 0 {
-		return false
-	}
 	if !store.snapshotRunning.CompareAndSwap(false, true) {
 		return false
 	}
+	store.evictionInterlock.Lock()
+	if store.evictionGeneration != 0 {
+		store.evictionInterlock.Unlock()
+		store.snapshotRunning.Store(false)
+		return false
+	}
+	evictionGeneration := store.evictionGeneration
 	store.snapshotWG.Add(1)
+	store.evictionInterlock.Unlock()
 	go func() {
 		defer store.snapshotWG.Done()
 		defer store.snapshotRunning.Store(false)
-		if err := store.writeSnapshot(); err != nil {
+		if err := store.writeSnapshotAt(evictionGeneration); err != nil {
 			store.stats.lastSnapshotError.Store(&errorState{err: err})
 			if store.logger != nil {
 				store.logger.Error("write automatic snapshot", "error", err)
@@ -53,7 +57,16 @@ func (store *Store) startSnapshot() bool {
 }
 
 func (store *Store) writeSnapshot() error {
+	store.evictionInterlock.Lock()
+	evictionGeneration := store.evictionGeneration
+	store.evictionInterlock.Unlock()
+	if evictionGeneration != 0 {
+		return fmt.Errorf("cache: cannot snapshot in-memory state after eviction generation %d", evictionGeneration)
+	}
+	return store.writeSnapshotAt(evictionGeneration)
+}
 
+func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
 	file, err := os.CreateTemp(store.dir, ".snapshot-*")
 	if err != nil {
 		return fmt.Errorf("cache: create snapshot temporary file: %w", err)
@@ -111,13 +124,18 @@ func (store *Store) writeSnapshot() error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("cache: close snapshot %q: %w", temporaryPath, err)
 	}
+	store.evictionInterlock.Lock()
+	defer store.evictionInterlock.Unlock()
+	if store.evictionGeneration != evictionGeneration {
+		return nil
+	}
 
 	target := filepath.Join(store.dir, snapshotName(lowest))
 	if err := os.Rename(temporaryPath, target); err != nil {
 		return fmt.Errorf("cache: install snapshot %q: %w", target, err)
 	}
 	removeTemporary = false
-	if err := syncDirectory(store.dir); err != nil {
+	if err := store.directorySync(store.dir); err != nil {
 		return err
 	}
 	if err := removeOtherSnapshots(store.dir, target); err != nil {
@@ -131,8 +149,11 @@ func (store *Store) writeSnapshot() error {
 }
 
 func (store *Store) writeFinalSnapshot() error {
-	if store.stats.evictions.Load() == 0 {
-		return store.writeSnapshot()
+	store.evictionInterlock.Lock()
+	evictionGeneration := store.evictionGeneration
+	store.evictionInterlock.Unlock()
+	if evictionGeneration == 0 {
+		return store.writeSnapshotAt(evictionGeneration)
 	}
 
 	recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
@@ -163,19 +184,19 @@ func encodeSnapshotEntry(current *entry) []byte {
 	return record
 }
 
-func loadSnapshot(ctx context.Context, store *Store) ([]uint64, error) {
+func loadSnapshot(ctx context.Context, store *Store) (snapshotState, error) {
 	snapshots, err := listSnapshots(store.dir)
 	if err != nil || len(snapshots) == 0 {
-		return nil, err
+		return snapshotState{}, err
 	}
 	snapshot := snapshots[len(snapshots)-1]
 	file, err := os.Open(snapshot.path)
 	if err != nil {
-		return nil, fmt.Errorf("cache: open snapshot %q: %w", snapshot.path, err)
+		return snapshotState{}, fmt.Errorf("cache: open snapshot %q: %w", snapshot.path, err)
 	}
 	defer file.Close()
-	fail := func(offset int64, cause error) ([]uint64, error) {
-		return nil, fmt.Errorf("cache: recover %q at offset %d: %w", snapshot.path, offset, cause)
+	fail := func(offset int64, cause error) (snapshotState, error) {
+		return snapshotState{}, fmt.Errorf("cache: recover %q at offset %d: %w", snapshot.path, offset, cause)
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -256,10 +277,7 @@ func loadSnapshot(ctx context.Context, store *Store) ([]uint64, error) {
 		store.applyRecoveredSet(key, append([]byte(nil), payload[keyOffset+keyLength:]...), deadline, sequence)
 		offset = end
 	}
-	if mismatchedShards {
-		return nil, nil
-	}
-	return sequences, nil
+	return newSnapshotState(sequences, !mismatchedShards), nil
 }
 
 func listSnapshots(dir string) ([]snapshotFile, error) {
@@ -268,19 +286,22 @@ func listSnapshots(dir string) ([]snapshotFile, error) {
 		return nil, fmt.Errorf("cache: read directory %q: %w", dir, err)
 	}
 	snapshots := make([]snapshotFile, 0, 1)
+	seen := make(map[uint64]string)
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".snap") {
 			continue
 		}
-		if len(name) != len("00000001.snap") {
-			return nil, fmt.Errorf("cache: invalid snapshot name %q", filepath.Join(dir, name))
-		}
-		sequence, err := strconv.ParseUint(name[:8], 10, 64)
+		sequence, err := parseSnapshotFilename(dir, name)
 		if err != nil {
-			return nil, fmt.Errorf("cache: invalid snapshot name %q", filepath.Join(dir, name))
+			return nil, err
 		}
-		snapshots = append(snapshots, snapshotFile{path: filepath.Join(dir, name), lowestSequence: sequence})
+		if previous, exists := seen[sequence]; exists {
+			return nil, fmt.Errorf("cache: duplicate snapshot sequence %d in %q and %q", sequence, previous, filepath.Join(dir, name))
+		}
+		path := filepath.Join(dir, name)
+		seen[sequence] = path
+		snapshots = append(snapshots, snapshotFile{path: path, lowestSequence: sequence})
 	}
 	sort.Slice(snapshots, func(left, right int) bool {
 		return snapshots[left].lowestSequence < snapshots[right].lowestSequence
@@ -289,14 +310,22 @@ func listSnapshots(dir string) ([]snapshotFile, error) {
 }
 
 func removeOtherSnapshots(dir, retained string) error {
-	snapshots, err := listSnapshots(dir)
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("cache: read directory %q: %w", dir, err)
 	}
-	for _, snapshot := range snapshots {
-		if snapshot.path != retained {
-			if err := os.Remove(snapshot.path); err != nil {
-				return fmt.Errorf("cache: remove superseded snapshot %q: %w", snapshot.path, err)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".snap") {
+			continue
+		}
+		if _, err := parseSnapshotFilename(dir, name); err != nil {
+			return err
+		}
+		path := filepath.Join(dir, name)
+		if path != retained {
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("cache: remove superseded snapshot %q: %w", path, err)
 			}
 		}
 	}
@@ -350,5 +379,5 @@ func syncDirectory(dir string) error {
 }
 
 func snapshotName(lowestSequence uint64) string {
-	return fmt.Sprintf("%08d.snap", lowestSequence)
+	return fmt.Sprintf("%020d.snap", lowestSequence)
 }

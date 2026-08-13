@@ -29,7 +29,7 @@ func TestSetTTLPersistsAbsoluteDeadlineAndRecoveryExpiresIt(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	segment, err := os.ReadFile(filepath.Join(dir, "00000001.seg"))
+	segment, err := os.ReadFile(filepath.Join(dir, "00000000000000000001.seg"))
 	if err != nil {
 		t.Fatalf("read segment: %v", err)
 	}
