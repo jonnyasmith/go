@@ -20,24 +20,29 @@ type segmentFile struct {
 
 type snapshotState struct {
 	loaded          bool
-	sequences       []uint64
 	replaySequences []uint64
 	lowest          uint64
 	highest         uint64
 }
 
-func (state snapshotState) bounds() (uint64, uint64) {
-	lowest := state.sequences[0]
-	highest := lowest
-	for _, sequence := range state.sequences[1:] {
-		if sequence < lowest {
-			lowest = sequence
+func newSnapshotState(sequences []uint64, perShardReplay bool) snapshotState {
+	state := snapshotState{
+		loaded:  true,
+		lowest:  sequences[0],
+		highest: sequences[0],
+	}
+	for _, sequence := range sequences[1:] {
+		if sequence < state.lowest {
+			state.lowest = sequence
 		}
-		if sequence > highest {
-			highest = sequence
+		if sequence > state.highest {
+			state.highest = sequence
 		}
 	}
-	return lowest, highest
+	if perShardReplay {
+		state.replaySequences = sequences
+	}
+	return state
 }
 
 func recoverLog(ctx context.Context, store *Store) (*logState, error) {
@@ -50,23 +55,16 @@ func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 		return nil, err
 	}
 
-	var snapshotLowest uint64
-	var snapshotHighest uint64
-	if snapshot.loaded {
-		snapshotLowest, snapshotHighest = snapshot.bounds()
-		snapshot.lowest = snapshotLowest
-		snapshot.highest = snapshotHighest
-	}
 	if len(segments) == 0 {
 		nextSequence := uint64(1)
 		if snapshot.loaded {
-			if snapshotLowest != snapshotHighest {
-				return nil, fmt.Errorf("cache: sequence gap after snapshot sequence %d: no retained WAL covers through sequence %d", snapshotLowest, snapshotHighest)
+			if snapshot.lowest != snapshot.highest {
+				return nil, fmt.Errorf("cache: sequence gap after snapshot sequence %d: no retained WAL covers through sequence %d", snapshot.lowest, snapshot.highest)
 			}
-			if snapshotHighest == ^uint64(0) {
-				return nil, fmt.Errorf("cache: sequence space exhausted at %d", snapshotHighest)
+			if snapshot.highest == maxSequence {
+				return nil, fmt.Errorf("cache: sequence space exhausted at %d", snapshot.highest)
 			}
-			nextSequence = snapshotHighest + 1
+			nextSequence = snapshot.highest + 1
 		}
 		file, err := store.createSegment(nextSequence)
 		if err != nil {
@@ -79,12 +77,12 @@ func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 	start := 0
 	previousSequence := uint64(0)
 	if snapshot.loaded {
-		firstRequired := snapshotLowest
-		if firstRequired != ^uint64(0) {
+		firstRequired := snapshot.lowest
+		if firstRequired != maxSequence {
 			firstRequired++
 		}
 		if segments[0].firstSequence > firstRequired {
-			return nil, fmt.Errorf("cache: recover %q at offset %d: sequence gap after snapshot sequence %d", segments[0].path, segmentHeaderSize, snapshotLowest)
+			return nil, fmt.Errorf("cache: recover %q at offset %d: sequence gap after snapshot sequence %d", segments[0].path, segmentHeaderSize, snapshot.lowest)
 		}
 		for index, segment := range segments {
 			if segment.firstSequence <= firstRequired {
@@ -116,9 +114,9 @@ func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 			return nil, fmt.Errorf("cache: close recovered segment %q: %w", segments[index].path, err)
 		}
 	}
-	if snapshot.loaded && lastSequence < snapshotHighest {
+	if snapshot.loaded && lastSequence < snapshot.highest {
 		_ = finalFile.Close()
-		return nil, fmt.Errorf("cache: sequence gap after retained WAL sequence %d: snapshot requires history through sequence %d", lastSequence, snapshotHighest)
+		return nil, fmt.Errorf("cache: sequence gap after retained WAL sequence %d: snapshot requires history through sequence %d", lastSequence, snapshot.highest)
 	}
 	store.logSequence.Store(lastSequence)
 	return &logState{file: finalFile, offset: finalOffset, seq: lastSequence}, nil
@@ -136,7 +134,7 @@ func listSegments(dir string) ([]segmentFile, error) {
 		if entry.IsDir() || !strings.HasSuffix(name, ".seg") {
 			continue
 		}
-		sequence, err := parseSequenceFilename(dir, name, ".seg", "segment", false)
+		sequence, err := parseSegmentFilename(dir, name)
 		if err != nil {
 			return nil, err
 		}
@@ -151,6 +149,14 @@ func listSegments(dir string) ([]segmentFile, error) {
 		return segments[left].firstSequence < segments[right].firstSequence
 	})
 	return segments, nil
+}
+
+func parseSegmentFilename(dir, name string) (uint64, error) {
+	return parseSequenceFilename(dir, name, ".seg", "segment", false)
+}
+
+func parseSnapshotFilename(dir, name string) (uint64, error) {
+	return parseSequenceFilename(dir, name, ".snap", "snapshot", true)
 }
 
 func parseSequenceFilename(dir, name, suffix, kind string, allowZero bool) (uint64, error) {
@@ -256,7 +262,7 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		if keyLength > len(payload)-keyOffset {
 			return fail(offset, fmt.Errorf("key length %d exceeds record", keyLength))
 		}
-		if sequence == ^uint64(0) || recordSequence != sequence+1 {
+		if sequence == maxSequence || recordSequence != sequence+1 {
 			return fail(offset, fmt.Errorf("sequence gap: got %d after %d", recordSequence, sequence))
 		}
 		if firstRecord && recordSequence != segment.firstSequence {

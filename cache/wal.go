@@ -22,6 +22,7 @@ const (
 	recordKeyOffset       = 27
 	recordFixedSize       = recordKeyOffset
 	formatVersion         = uint16(1)
+	maxSequence           = ^uint64(0)
 	opSet                 = byte(1)
 	opDelete              = byte(2)
 )
@@ -148,7 +149,7 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 	}
 
 	for first := 0; first < len(requests); {
-		if log.seq == ^uint64(0) {
+		if log.seq == maxSequence {
 			failure := store.latch(fmt.Errorf("cache: WAL sequence space exhausted"))
 			respondAll(requests[first:], failure)
 			return
@@ -165,7 +166,7 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 		payload := make([]byte, 0, len(nextRecord)*(len(requests)-first))
 		last := first
 		for last < len(requests) {
-			if uint64(last-first) >= ^uint64(0)-log.seq {
+			if uint64(last-first) >= maxSequence-log.seq {
 				break
 			}
 			record := encodeRecord(log.seq+uint64(last-first)+1, requests[last])

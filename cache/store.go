@@ -87,11 +87,11 @@ type Store struct {
 	sweepStop chan struct{}
 	sweepDone chan struct{}
 
-	logSequence      atomic.Uint64
-	snapshotRunning  atomic.Bool
-	snapshotWG       sync.WaitGroup
-	snapshotInstall  sync.Mutex
-	evictionSequence uint64
+	logSequence        atomic.Uint64
+	snapshotRunning    atomic.Bool
+	snapshotWG         sync.WaitGroup
+	evictionInterlock  sync.Mutex
+	evictionGeneration uint64
 
 	directorySync func(string) error
 	lockFile      *os.File

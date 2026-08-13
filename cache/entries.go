@@ -142,9 +142,9 @@ func (store *Store) removeEntryLocked(shard *shard, current *entry, kind removal
 	case removalExpiry:
 		store.stats.expiries.Add(1)
 	case removalEviction:
-		store.snapshotInstall.Lock()
-		store.evictionSequence++
-		store.snapshotInstall.Unlock()
+		store.evictionInterlock.Lock()
+		store.evictionGeneration++
+		store.evictionInterlock.Unlock()
 		store.stats.evictions.Add(1)
 	}
 }
