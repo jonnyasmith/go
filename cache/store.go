@@ -15,7 +15,7 @@ var (
 	// ErrClosed distinguishes writes attempted after a Store has closed.
 	ErrClosed = errors.New("cache: store is closed")
 
-	errDirectoryLockHeld = errors.New("cache: directory lock is held")
+	errDirectoryLockHeld = errors.New("directory lock is held")
 )
 
 type entry struct {

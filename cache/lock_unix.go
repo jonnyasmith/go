@@ -10,7 +10,7 @@ import (
 
 func acquireDirectoryLock(file *os.File) error {
 	err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	if errors.Is(err, syscall.EWOULDBLOCK) {
 		return errDirectoryLockHeld
 	}
 	return err
