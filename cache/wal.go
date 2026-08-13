@@ -80,7 +80,7 @@ func (store *Store) runWriter(log *logState, options options) {
 			case requestSet, requestDelete:
 				batch, control := store.drainWrites(request)
 				store.writeBatch(log, options.segmentSize, batch)
-				if log.bytesSinceSnapshot >= options.snapshotThreshold && store.startSnapshot() {
+				if log.bytesSinceSnapshot >= options.snapshotThreshold && store.startSnapshot(log) {
 					log.bytesSinceSnapshot = 0
 				}
 				if control != nil && store.handleControl(log, control) {

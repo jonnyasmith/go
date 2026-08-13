@@ -45,6 +45,8 @@ Against the well-tuned in-memory caches in the Go ecosystem, the difference is d
 
 A store directory is owned by exactly one process, enforced by a lock file. Two processes cannot share one.
 
+Directory ownership is supported on Windows and on the Unix targets named by the Go build constraints. Unix lock and unlock operations retry interrupted system calls while preserving non-blocking contention errors. Unix installations fsync the store directory after renames. Windows uses an explicit fallback because the Go standard library cannot portably flush directory handles: snapshot and segment files are fsynced before rename, but the directory entry itself is not separately flushed.
+
 ## Guarantees
 
 **Accepted writes survive a crash.** Every change is appended to a write-ahead log before `Set` returns. Kill the process and reopen: nothing acknowledged is missing.
@@ -81,7 +83,11 @@ Options are passed to `Open` and validated there; an invalid value fails immedia
 
 Capacity is divided evenly across shards and must provide at least the fixed 64-byte overhead per shard. Each entry is charged for its key, value, and that overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats samples while at least one quarter are reclaimed, and spends at most one millisecond in a shard per visit.
 
-Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Automatic snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear. Clean shutdown reconstructs the durable image from that retained history before installing its mandatory final snapshot, so an evicted live entry still reappears when the store is reopened with a larger capacity.
+`Set` and `SetTTL` reject an entry before submission when its charged key, value, and overhead cannot fit in the target shard. Rejection does not append to the WAL, evict another entry, or change activity counters.
+
+Capacity and shard count may be changed between runs. A snapshot written with another shard count is loaded as the durable base image; recovery disables unsafe per-shard replay skipping and retains enough WAL history to replay every record after the snapshot's lowest sequence. The snapshot is not discarded, and retained history remains required to fill the skew between its shard sequences.
+
+Eviction never becomes a durable deletion. After any live-entry eviction, each automatic compaction rolls the writer to a new segment, reconstructs the durable image from the installed snapshot and immutable WAL prefix, and snapshots that image before pruning only the covered prefix. The configured snapshot threshold remains the compaction trigger under sustained pressure: retained WAL is bounded by that threshold plus records accepted while one compaction runs. Clean shutdown performs the same durable-image reconstruction, so reopening with greater capacity restores live entries that had been evicted from memory.
 
 ## Observability
 
@@ -89,7 +95,7 @@ Capacity and shard count may be changed between runs. A snapshot written with an
 
 ## On disk
 
-A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot, replays from its lowest recorded sequence, and tolerates records already represented in later shards. Snapshots are written automatically after the configured log-byte threshold and on clean shutdown, using a temporary file, fsync, and rename; superseded segments are deleted only after installation.
+A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot as a base image, replays from its lowest recorded sequence, and tolerates records already represented in later shards. Snapshots are written automatically after the configured log-byte threshold and on clean shutdown, using a temporary file, fsync, and rename; superseded segments are deleted only after installation.
 
 Damaged files are graded rather than treated alike. An incomplete record at the end of the log is what a crash mid-write looks like: it is trimmed and the store opens. Corruption with valid records after it, or a gap in the sequence, is real data loss: the store refuses to open and names the file and offset. There is no repair mode — a store that silently discards part of its history is worse than one that will not start.
 
