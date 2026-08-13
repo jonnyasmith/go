@@ -47,6 +47,10 @@ _Avoid_: Eviction, timeout, invalidation
 Removal of a live entry because the store is at capacity and needs room. Driven by pressure alone, never by a deadline.
 _Avoid_: Expiry, purge, reaping
 
+**Detached view**:
+The stale in-memory contents a store retains after `Close` releases directory ownership. Reads remain valid against this view but never observe changes made by a later owner of the directory.
+_Avoid_: Closed store (reads remain valid), snapshot, live view
+
 ### Durability
 
 **Write-ahead log**:

@@ -170,11 +170,10 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 			if uint64(last-first) >= maxSequence-log.seq {
 				break
 			}
-			size := recordSizeFor(requests[last])
-			if last > first && log.offset+int64(payloadSize)+int64(size) > segmentSize {
+			if last > first && log.offset+int64(payloadSize) > segmentSize {
 				break
 			}
-			payloadSize += size
+			payloadSize += recordSizeFor(requests[last])
 			last++
 		}
 
@@ -233,16 +232,13 @@ func respondAll(requests []*writeRequest, err error) {
 	}
 }
 
-func encodeRecord(sequence uint64, request *writeRequest) []byte {
-	return appendRecord(nil, sequence, request)
-}
-
 func recordSizeFor(request *writeRequest) int {
 	return recordFixedSize + len(request.key) + len(request.value)
 }
 
 func appendRecord(dst []byte, sequence uint64, request *writeRequest) []byte {
 	start := len(dst)
+	// Extending with a zeroed slice lets append reuse caller capacity without a temporary allocation.
 	dst = append(dst, make([]byte, recordSizeFor(request))...)
 	record := dst[start:]
 	binary.LittleEndian.PutUint32(record[:recordCRCOffset], uint32(len(record)-segmentLengthSize))

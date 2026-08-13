@@ -1,12 +1,14 @@
 package cache
 
 import (
+	"encoding/binary"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestWriteBatchRollsBeforeRecordBeyondExactBoundary(t *testing.T) {
+func TestWriteBatchPreservesRolloverAfterExceededBoundary(t *testing.T) {
 	dir := t.TempDir()
 	store := newStoreState(dir, nil, 1, 1<<20, nil)
 	file, err := store.createSegment(1)
@@ -18,6 +20,7 @@ func TestWriteBatchRollsBeforeRecordBeyondExactBoundary(t *testing.T) {
 		newTestSetRequest("a"),
 		newTestSetRequest("b"),
 		newTestSetRequest("c"),
+		newTestSetRequest("d"),
 	}
 
 	const recordSize = recordFixedSize + 1
@@ -35,18 +38,18 @@ func TestWriteBatchRollsBeforeRecordBeyondExactBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat first segment: %v", err)
 	}
-	if first.Size() != segmentHeaderSize+2*recordSize {
-		t.Fatalf("first segment size = %d; want exact boundary %d", first.Size(), segmentHeaderSize+2*recordSize)
+	if first.Size() != segmentHeaderSize+3*recordSize {
+		t.Fatalf("first segment size = %d; want one record beyond boundary %d", first.Size(), segmentHeaderSize+3*recordSize)
 	}
-	second, err := os.Stat(filepath.Join(dir, segmentName(3)))
+	second, err := os.Stat(filepath.Join(dir, segmentName(4)))
 	if err != nil {
 		t.Fatalf("stat rollover segment: %v", err)
 	}
 	if second.Size() != segmentHeaderSize+recordSize {
 		t.Fatalf("second segment size = %d; want %d", second.Size(), segmentHeaderSize+recordSize)
 	}
-	if log.seq != 3 {
-		t.Fatalf("sequence = %d; want 3", log.seq)
+	if log.seq != 4 {
+		t.Fatalf("sequence = %d; want 4", log.seq)
 	}
 }
 
@@ -57,12 +60,27 @@ func TestAppendRecordUsesCallerStorage(t *testing.T) {
 	copy(storage, prefix)
 
 	encoded := appendRecord(storage, 7, request)
+	if &encoded[0] != &storage[0] {
+		t.Fatal("encoded record did not reuse caller storage")
+	}
 	if string(encoded[:len(prefix)]) != string(prefix) {
 		t.Fatalf("prefix = %q; want %q", encoded[:len(prefix)], prefix)
 	}
 	if len(encoded) != len(prefix)+recordSizeFor(request) {
 		t.Fatalf("encoded length = %d; want %d", len(encoded), len(prefix)+recordSizeFor(request))
 	}
+	record := encoded[len(prefix):]
+	if length := binary.LittleEndian.Uint32(record[:recordCRCOffset]); length != uint32(len(record)-segmentLengthSize) {
+		t.Fatalf("record length = %d; want %d", length, len(record)-segmentLengthSize)
+	}
+	checksum := binary.LittleEndian.Uint32(record[recordCRCOffset:recordOpOffset])
+	if want := crc32.Checksum(record[recordOpOffset:], crcTable); checksum != want {
+		t.Fatalf("record checksum = %d; want %d", checksum, want)
+	}
+}
+
+func encodeRecord(sequence uint64, request *writeRequest) []byte {
+	return appendRecord(nil, sequence, request)
 }
 
 func newTestSetRequest(key string) *writeRequest {

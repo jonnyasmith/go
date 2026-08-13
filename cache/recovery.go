@@ -26,8 +26,6 @@ type snapshotState struct {
 	highest         uint64
 }
 
-const recoveryReadBufferSize = 64 << 10
-
 func newSnapshotState(sequences []uint64, perShardReplay bool) snapshotState {
 	state := snapshotState{
 		loaded:  true,
@@ -233,6 +231,8 @@ func parseSequenceFilename(dir, name, suffix, kind string, allowZero bool) (uint
 	}
 	return sequence, nil
 }
+
+const recoveryReadBufferSize = 64 << 10
 
 func recoverSegment(ctx context.Context, store *Store, segment segmentFile, final bool, previousSequence uint64, snapshot snapshotState, through uint64) (*os.File, int64, uint64, error) {
 	flags := os.O_RDONLY
