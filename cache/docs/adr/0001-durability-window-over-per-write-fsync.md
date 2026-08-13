@@ -6,4 +6,5 @@ The store must be fast under concurrent writes and must not lose data on process
 
 - A process crash loses nothing; a power failure loses at most one flush interval. That span is the durability window and the README must state it rather than claim "persistent".
 - Because the writer goroutine reports the result of the write back to the caller, a disk error surfaces to the caller whose write hit it, not to a background log line.
-- The writer is the only owner of the file offset and the sequence counter, so ordering needs no lock.
+- The writer is the only owner of the file offset and of the sequence counter it stamps into records, so ordering needs no lock. The apply side publishes the sequence it has reached through a separate atomic, which is what snapshot serialization reads under each shard's lock; the two are different surfaces and must not be confused.
+- The sequence space is finite. Exhausting it latches the store on the write path and refuses `Open` on reopen, because a wrapped sequence would make replay ordering and snapshot coverage meaningless. Reuse would be cheaper than refusing and is not worth the class of bug it invites.

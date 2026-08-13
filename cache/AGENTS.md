@@ -3,8 +3,7 @@
 ## Routing
 
 - Cache vocabulary → docs/agents/domain.md
-- Cache decisions → docs/adr/
-- Byte-level layout of segments, snapshots, and recovery → docs/on-disk-format.md
+- Cache decisions, including the on-disk format and its evolution → docs/adr/
 
 ## Verification
 

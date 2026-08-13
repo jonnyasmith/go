@@ -49,7 +49,7 @@ Directory ownership is supported on Windows and on the Unix targets named by the
 
 ## Guarantees
 
-**Accepted writes survive a crash.** Every change is appended to a write-ahead log before `Set` returns. Kill the process and reopen: nothing acknowledged is missing.
+**Accepted writes survive a crash.** Every change is appended to a write-ahead log before `Set`, `SetTTL`, or `Delete` returns. Kill the process and reopen: nothing acknowledged is missing.
 
 **Power loss costs at most one flush interval.** An fsync runs on a ticker rather than on every write, so a `Set` does not wait for the disk. The interval is the *durability window* and it is configurable; `Sync` closes it on demand. This is the trade the store makes for write throughput, and it is stated here rather than buried.
 
@@ -97,17 +97,15 @@ Eviction never becomes a durable deletion. After any live-entry eviction, each a
 
 ## On disk
 
-A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. After acquiring the directory lock, `Open` removes regular files whose names begin `.segment-` or `.snapshot-`, the two temporary-file classes created by this module; it does not follow links or remove directories, installed files, `LOCK`, or unrelated dotfiles. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot as a base image, replays from its lowest recorded sequence, and tolerates records already represented in later shards. Snapshots are written automatically after the configured log-byte threshold and on clean shutdown, using a temporary file, fsync, and rename; superseded segments are deleted only after installation.
+A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. After acquiring the directory lock, `Open` removes regular files whose names begin `.segment-` or `.snapshot-`, the two temporary-file classes created by this module; it does not follow links or remove directories, installed files, `LOCK`, or unrelated dotfiles. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot as a base image, replays from its lowest recorded sequence, and skips each record whose shard already covers it. Snapshots are written automatically after the configured log-byte threshold and on clean shutdown, using a temporary file, fsync, and rename; superseded segments are deleted only after installation.
 
 Damaged files are graded rather than treated alike. An incomplete record at the end of the log is what a crash mid-write looks like: it is trimmed and the store opens. Corruption with valid records after it, or a gap in the sequence, is real data loss: the store refuses to open and names the file and offset. There is no repair mode — a store that silently discards part of its history is worse than one that will not start.
 
-The byte-level layout is specified in [docs/on-disk-format.md](docs/on-disk-format.md).
-
 ## Command
 
-`cmd/cached repl -dir DIRECTORY` opens a terminal REPL. Commands are `set KEY VALUE [TTL]`, `get KEY`, `delete KEY`, `stats`, `sync`, and `quit`; TTLs use Go duration syntax such as `30s` or `5m`. Keys and values are single whitespace-delimited tokens: quoting and escaping are not supported, so values containing whitespace cannot be represented.
+`cmd/cached repl -dir DIRECTORY` opens a terminal REPL, and accepts the same `-capacity`, `-shards`, and `-snapshot-threshold` flags as `load`. Commands are `set KEY VALUE [TTL]`, `get KEY`, `delete KEY`, `stats`, `sync`, and `quit` (or `exit`); TTLs use Go duration syntax such as `30s` or `5m`. Keys and values are single whitespace-delimited tokens: quoting and escaping are not supported, so values containing whitespace cannot be represented.
 
-`cmd/cached load -dir DIRECTORY -read-percent 90 -workers 8` drives a configurable concurrent read/write mix until interrupted. `-keyspace`, `-capacity`, `-shards`, `-snapshot-threshold`, `-value-bytes`, and `-ttl` make expiry, eviction, snapshot installation, and shutdown observable under load. A 100% read workload reads only the store as it already exists; the command does not prewarm or create keys. Interrupt and termination signals stop the workload, run the store's full close sequence, and report whether closure succeeded. The command opens no listener and implements no wire protocol.
+`cmd/cached load -dir DIRECTORY -read-percent 90 -workers 8` drives a configurable concurrent read/write mix until interrupted. `-keyspace`, `-capacity`, `-shards`, `-snapshot-threshold`, `-value-bytes`, and `-ttl` make expiry, eviction, snapshot installation, and shutdown observable under load. They default to a keyspace of 10000, one worker, no reads, a value the size of its key, and no TTL. A 100% read workload reads only the store as it already exists; the command does not prewarm or create keys. Every acknowledged key is written to standard output as it is accepted, which is what the crash suite reads back; the closing counts go to standard error. Interrupt and termination signals stop the workload, run the store's full close sequence, and report whether closure succeeded. The command opens no listener and implements no wire protocol.
 
 ## Dependencies
 
@@ -130,6 +128,5 @@ The durable store, lifetime and capacity management, segmented log, snapshots, g
 
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them
-- [`docs/on-disk-format.md`](docs/on-disk-format.md) — the byte-level contract
 
-Where this README and those documents disagree, they are right and this is stale.
+Where this README and those documents disagree, they are right and this is stale. There is no separate format specification: the log and snapshot layouts are defined by the code that reads them, and the decisions behind them are in the ADRs.

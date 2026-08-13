@@ -6,3 +6,4 @@
 
 - Cancellation is meaningful during recovery because `Open` can stop before a `Store` is exposed and before any mutation is accepted.
 - Callers always receive the definitive outcome of a mutation. A shorter-lived caller may stop waiting in its own goroutine, but the mutation retains one owner and completes exactly once.
+- "`Get` never performs I/O" is an argument about cancellation, not a claim that reads are side-effect free. A read takes its shard's lock, drops the entry if its deadline has passed, and updates recency and counters. It cannot block on a disk, which is the only property the decision rests on.

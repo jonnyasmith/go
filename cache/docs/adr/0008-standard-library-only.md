@@ -8,3 +8,4 @@ No third-party module appears in `cache/go.mod`, for the runtime or for tests. T
 - There is no metrics interface for callers to implement either, since an indirect call on every hit would cost more than the counter it feeds.
 - Tests use `testing` and its fuzzing support only; crash injection is a subprocess and a signal, not a framework.
 - The rule binds `go.mod` only, not the toolchain. `gofmt`, `go vet`, and `go test -race` are the gate, and a pinned external linter is fine because it never enters the module graph.
+- The rule has a price, paid in two visible places. Windows locking reaches the API through `syscall.NewLazyDLL` rather than `golang.org/x/sys/windows`, and fault injection is a swappable set of file operations on the shipped `Store` rather than an interface a mocking framework fills in. Both are uglier than the dependency they replace; neither is load-bearing for callers.
