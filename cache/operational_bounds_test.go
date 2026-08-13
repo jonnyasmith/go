@@ -300,7 +300,10 @@ func TestAutomaticSnapshotSuccessClearsEarlierError(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	injected := errors.New("injected snapshot creation failure")
-	store.createTemp = func(string, string) (*os.File, error) { return nil, injected }
+	originalFiles := store.files.Load()
+	failingFiles := *originalFiles
+	failingFiles.createTemp = func(string, string) (*os.File, error) { return nil, injected }
+	store.files.Store(&failingFiles)
 	if !store.startSnapshot(&logState{seq: store.logSequence.Load()}) {
 		t.Fatal("start failing automatic snapshot: false")
 	}
@@ -309,7 +312,24 @@ func TestAutomaticSnapshotSuccessClearsEarlierError(t *testing.T) {
 		t.Fatalf("last error after failure = %q; want %q", got, injected)
 	}
 
-	store.createTemp = os.CreateTemp
+	store.files.Store(originalFiles)
+	store.shards[0].mu.Lock()
+	if !store.startSnapshot(&logState{seq: store.logSequence.Load()}) {
+		store.shards[0].mu.Unlock()
+		t.Fatal("start discarded automatic snapshot: false")
+	}
+	store.evictionInterlock.Lock()
+	store.evictionGeneration++
+	store.evictionInterlock.Unlock()
+	store.shards[0].mu.Unlock()
+	waitForSnapshot(t, store)
+	if got := store.Stats().LastError; !strings.Contains(got, injected.Error()) {
+		t.Fatalf("last error after discarded snapshot = %q; want prior error %q", got, injected)
+	}
+	store.evictionInterlock.Lock()
+	store.evictionGeneration = 0
+	store.evictionInterlock.Unlock()
+
 	if !store.startSnapshot(&logState{seq: store.logSequence.Load()}) {
 		t.Fatal("start successful automatic snapshot: false")
 	}
@@ -356,14 +376,17 @@ func TestSnapshotCounterUsesCompletedInstallationAndCleanupBoundary(t *testing.T
 			t.Fatalf("write stale snapshot: %v", err)
 		}
 		injected := errors.New("injected cleanup failure")
-		store.removeFile = func(path string) error {
+		originalFiles := store.files.Load()
+		failingFiles := *originalFiles
+		failingFiles.remove = func(path string) error {
 			if path == stale {
 				return injected
 			}
 			return os.Remove(path)
 		}
+		store.files.Store(&failingFiles)
 		err = store.writeSnapshot()
-		store.removeFile = os.Remove
+		store.files.Store(originalFiles)
 		if err == nil || !strings.Contains(err.Error(), "is installed but cleanup failed") || !strings.Contains(err.Error(), stale) {
 			t.Fatalf("snapshot error = %v; want installed cleanup failure naming %q", err, stale)
 		}
@@ -430,7 +453,9 @@ func TestTemporaryCleanupErrorNamesPath(t *testing.T) {
 	}
 	store := newStoreState(dir, nil, 1, 1<<20, nil)
 	injected := errors.New("injected cleanup failure")
-	store.removeFile = func(string) error { return injected }
+	failingFiles := *store.files.Load()
+	failingFiles.remove = func(string) error { return injected }
+	store.files.Store(&failingFiles)
 	err := store.removeTemporaryFiles()
 	if err == nil || !strings.Contains(err.Error(), path) || !errors.Is(err, injected) {
 		t.Fatalf("cleanup error = %v; want path %q and injected cause", err, path)
@@ -453,17 +478,22 @@ func TestWALFailuresLatchThroughPerStoreFilesystemSeam(t *testing.T) {
 			}
 
 			injected := fmt.Errorf("injected WAL %s failure", failurePoint)
-			var firstErr error
+			originalFiles := store.files.Load()
+			failingFiles := *originalFiles
 			switch failurePoint {
 			case "create":
-				store.createTemp = func(string, string) (*os.File, error) { return nil, injected }
-				firstErr = store.Set("rejected", []byte("value"))
+				failingFiles.createTemp = func(string, string) (*os.File, error) { return nil, injected }
 			case "write":
-				store.writeWAL = func(*os.File, []byte) (int, error) { return 0, injected }
-				firstErr = store.Set("rejected", []byte("value"))
+				failingFiles.writeWAL = func(*os.File, []byte) (int, error) { return 0, injected }
 			case "sync":
-				store.syncWAL = func(*os.File) error { return injected }
+				failingFiles.syncWAL = func(*os.File) error { return injected }
+			}
+			store.files.Store(&failingFiles)
+			var firstErr error
+			if failurePoint == "sync" {
 				firstErr = store.Sync()
+			} else {
+				firstErr = store.Set("rejected", []byte("value"))
 			}
 			if firstErr == nil || !errors.Is(firstErr, injected) {
 				t.Fatalf("first failure = %v; want injected cause", firstErr)
@@ -478,9 +508,7 @@ func TestWALFailuresLatchThroughPerStoreFilesystemSeam(t *testing.T) {
 				t.Fatalf("last error = %q; want %q", got, injected)
 			}
 
-			store.createTemp = os.CreateTemp
-			store.writeWAL = func(file *os.File, payload []byte) (int, error) { return file.Write(payload) }
-			store.syncWAL = func(file *os.File) error { return file.Sync() }
+			store.files.Store(originalFiles)
 			if err := store.Close(); err == nil {
 				t.Fatal("close after latched durability failure unexpectedly succeeded")
 			}
@@ -566,6 +594,9 @@ func BenchmarkFinalSnapshotAfterEviction(b *testing.B) {
 		if err := store.Set(fmt.Sprintf("key-%03d", index), value); err != nil {
 			b.Fatalf("set %d: %v", index, err)
 		}
+	}
+	if stats := store.Stats(); stats.Evictions == 0 {
+		b.Fatalf("stats = %+v; benchmark requires eviction-aware reconstruction", stats)
 	}
 	b.Cleanup(func() { _ = store.Close() })
 	b.ReportAllocs()

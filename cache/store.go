@@ -68,6 +68,20 @@ type Stats struct {
 	LastError      string
 }
 
+type fileOperations struct {
+	createTemp func(string, string) (*os.File, error)
+	writeWAL   func(*os.File, []byte) (int, error)
+	syncWAL    func(*os.File) error
+	remove     func(string) error
+}
+
+var defaultFileOperations = &fileOperations{
+	createTemp: os.CreateTemp,
+	writeWAL:   func(file *os.File, payload []byte) (int, error) { return file.Write(payload) },
+	syncWAL:    func(file *os.File) error { return file.Sync() },
+	remove:     os.Remove,
+}
+
 // Store is a concurrent in-memory key-value collection backed by a write-ahead log.
 type Store struct {
 	dir    string
@@ -96,14 +110,10 @@ type Store struct {
 	snapshotWG         sync.WaitGroup
 	evictionInterlock  sync.Mutex
 	evictionGeneration uint64
-	recoveryShard      int
+	recoveryShard      *int
 
 	directorySync func(string) error
-	createTemp    func(string, string) (*os.File, error)
-	writeWAL      func(*os.File, []byte) (int, error)
-	syncWAL       func(*os.File) error
-	renameFile    func(string, string) error
-	removeFile    func(string) error
+	files         atomic.Pointer[fileOperations]
 	lockFile      *os.File
 }
 
@@ -120,15 +130,10 @@ func newStoreState(dir string, logger *slog.Logger, shardCount int, shardCapacit
 		flushDone:     make(chan struct{}),
 		sweepStop:     make(chan struct{}),
 		sweepDone:     make(chan struct{}),
-		recoveryShard: -1,
 		directorySync: syncDirectory,
-		createTemp:    os.CreateTemp,
-		writeWAL:      func(file *os.File, payload []byte) (int, error) { return file.Write(payload) },
-		syncWAL:       func(file *os.File) error { return file.Sync() },
-		renameFile:    os.Rename,
-		removeFile:    os.Remove,
 		lockFile:      lockFile,
 	}
+	store.files.Store(defaultFileOperations)
 	for index := range store.shards {
 		store.shards[index].entries = make(map[string]*entry)
 		store.shards[index].capacity = shardCapacity
@@ -204,7 +209,7 @@ func (store *Store) removeTemporaryFiles() error {
 			continue
 		}
 		path := filepath.Join(store.dir, name)
-		if err := store.removeFile(path); err != nil {
+		if err := store.files.Load().remove(path); err != nil {
 			return fmt.Errorf("cache: remove stale temporary file %q: %w", path, err)
 		}
 	}

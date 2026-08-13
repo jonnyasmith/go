@@ -338,7 +338,7 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		key := string(payload[keyOffset : keyOffset+keyLength])
 		value := payload[keyOffset+keyLength:]
 		shardIndex := hashKey(key) & store.shardMask
-		apply := store.recoveryShard < 0 || int(shardIndex) == store.recoveryShard
+		apply := store.recoveryShard == nil || int(shardIndex) == *store.recoveryShard
 		if snapshot.loaded {
 			if snapshot.replaySequences != nil {
 				apply = apply && recordSequence > snapshot.replaySequences[shardIndex]

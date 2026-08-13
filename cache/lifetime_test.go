@@ -7,24 +7,25 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-	"unsafe"
 
 	cache "github.com/jonnyasmith/go/cache"
 )
 
-type testEntryRepresentation struct {
-	key      string
-	value    []byte
-	deadline int64
-	sequence uint64
-	previous *testEntryRepresentation
-	next     *testEntryRepresentation
+func chargedSmallEntryBytes(t *testing.T) uint64 {
+	t.Helper()
+	store, err := cache.Open(context.Background(), t.TempDir(), cache.WithShards(1))
+	if err != nil {
+		t.Fatalf("open charge probe: %v", err)
+	}
+	if err := store.Set("k", []byte("v")); err != nil {
+		t.Fatalf("set charge probe: %v", err)
+	}
+	charged := store.Bytes()
+	if err := store.Close(); err != nil {
+		t.Fatalf("close charge probe: %v", err)
+	}
+	return charged
 }
-
-const (
-	testEntryOverhead = uint64(unsafe.Sizeof(testEntryRepresentation{}))
-	smallEntryBytes   = testEntryOverhead + 2
-)
 
 func TestSetTTLPersistsAbsoluteDeadlineAndRecoveryExpiresIt(t *testing.T) {
 	dir := t.TempDir()
@@ -131,6 +132,7 @@ func TestSweepReclaimsExpiredEntries(t *testing.T) {
 
 func TestCapacityEvictsShardLRUAndRecoveryReplaysIt(t *testing.T) {
 	dir := t.TempDir()
+	smallEntryBytes := chargedSmallEntryBytes(t)
 	store, err := cache.Open(context.Background(), dir, cache.WithShards(1), cache.WithCapacity(2*smallEntryBytes))
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -183,6 +185,7 @@ func TestCapacityEvictsShardLRUAndRecoveryReplaysIt(t *testing.T) {
 
 func TestRecoveryHonoursSmallerCapacity(t *testing.T) {
 	dir := t.TempDir()
+	smallEntryBytes := chargedSmallEntryBytes(t)
 	store, err := cache.Open(context.Background(), dir, cache.WithShards(1), cache.WithCapacity(3*smallEntryBytes))
 	if err != nil {
 		t.Fatalf("open: %v", err)

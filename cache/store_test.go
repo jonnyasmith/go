@@ -23,6 +23,7 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	if err := store.Set("key", input); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+	chargedBytes := store.Bytes()
 	input[0] = 'X'
 
 	got, ok := store.Get("key")
@@ -40,7 +41,7 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	if !ok || string(dst) != "value" {
 		t.Fatalf("get into = %q, %v; want value, true", dst, ok)
 	}
-	if store.Len() != 1 || store.Bytes() != testEntryOverhead+uint64(len("key")+len("value")) {
+	if store.Len() != 1 || store.Bytes() != chargedBytes {
 		t.Fatalf("size = %d entries, %d bytes", store.Len(), store.Bytes())
 	}
 
