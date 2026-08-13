@@ -1,12 +1,14 @@
 # cache
 
-An embeddable key-value store for Go. The durable map core survives process restart; expiry and memory-capacity work remain planned.
+An embeddable key-value store for Go. The durable in-memory store survives process restart, expires stale entries, and stays within a configured memory capacity.
 
-> **Status:** `Open`, the map operations, write-ahead log recovery, synchronization, statistics, and load-mode command are implemented. TTL, capacity eviction, sweeping, and snapshots remain specified but are not yet implemented.
+> **Status:** `Open`, map operations, TTL expiry, capacity eviction, bounded sweeping, write-ahead log recovery, synchronization, statistics, and the load-mode command are implemented. Snapshots remain specified but are not yet implemented.
 
 ```go
 c, err := cache.Open(ctx, "/var/lib/myapp/cache",
+    cache.WithCapacity(256 << 20),
     cache.WithFlushInterval(time.Second),
+    cache.WithSweepInterval(time.Second),
 )
 if err != nil {
     return err
@@ -67,16 +69,18 @@ A store directory is owned by exactly one process, enforced by a lock file. Two 
 
 Options are passed to `Open` and validated there; an invalid value fails immediately with an error naming the option.
 
-| Option | Controls | Status |
+| Option | Controls | Default |
 | --- | --- | --- |
-| `WithShards` | Shard count, a power of two; defaults to `GOMAXPROCS` rounded up | Implemented |
-| `WithFlushInterval` | The durability window | Implemented |
-| `WithSegmentSize` | When the log rolls to a new file | Implemented |
-| `WithCapacity` | Byte ceiling across the store — key, value, and per-entry overhead | Planned |
-| `WithSweepInterval` | How often expired entries are reclaimed | Planned |
-| `WithLogger` | A `*slog.Logger`; silent by default | Implemented |
+| `WithShards` | Shard count, a power of two | `GOMAXPROCS` rounded up |
+| `WithCapacity` | Byte ceiling across the store | 256 MiB |
+| `WithFlushInterval` | The durability window | 1 second |
+| `WithSegmentSize` | When the log rolls to a new file | 64 MiB |
+| `WithSweepInterval` | How often every shard is considered for reclamation | 1 second |
+| `WithLogger` | A `*slog.Logger`; silent by default | no logger |
 
-When capacity and snapshots are implemented, capacity and shard count may both be changed between runs without losing data. A changed shard count will discard the snapshot and replay the log instead, costing a slower start and nothing else.
+Capacity is divided evenly across shards. Each entry is charged for its key, value, and a fixed 64-byte overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats productive samples, and spends at most one millisecond in a shard per visit.
+
+Capacity may be changed between runs without invalidating the log; recovery evicts to the new bound before `Open` returns. Snapshot support will also allow shard count changes without losing data; until then recovery always replays the log using the configured shard count.
 
 ## Observability
 
@@ -111,7 +115,7 @@ go test -race ./...
 
 ## Status
 
-The durable-store scope is implemented. TTL expiry, capacity and LRU eviction, background sweeping, and snapshots remain planned:
+Lifetime management, byte capacity, and the durable-store core are implemented. Snapshots, the terminal REPL, and configurable load mixes remain planned:
 
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them
