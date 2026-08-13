@@ -11,8 +11,12 @@ import (
 	"sync/atomic"
 )
 
-// ErrClosed distinguishes writes attempted after a Store has closed.
-var ErrClosed = errors.New("cache: store is closed")
+var (
+	// ErrClosed distinguishes writes attempted after a Store has closed.
+	ErrClosed = errors.New("cache: store is closed")
+
+	errDirectoryLockHeld = errors.New("cache: directory lock is held")
+)
 
 type entry struct {
 	value []byte
@@ -89,13 +93,16 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		return nil, fmt.Errorf("cache: create directory %q: %w", dir, err)
 	}
 
-	ownershipFile, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cache: open lock for %q: %w", dir, err)
 	}
-	if err := lockFile(ownershipFile); err != nil {
-		_ = ownershipFile.Close()
-		return nil, fmt.Errorf("cache: store directory %q is already open: %w", dir, err)
+	if err := acquireDirectoryLock(lockFile); err != nil {
+		_ = lockFile.Close()
+		if errors.Is(err, errDirectoryLockHeld) {
+			return nil, fmt.Errorf("cache: store directory %q is already open: %w", dir, err)
+		}
+		return nil, fmt.Errorf("cache: lock store directory %q: %w", dir, err)
 	}
 
 	store := &Store{
@@ -105,7 +112,7 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		shardMask: uint64(options.shards - 1),
 		requests:  make(chan *writeRequest, 1024),
 		done:      make(chan struct{}),
-		lockFile:  ownershipFile,
+		lockFile:  lockFile,
 	}
 	for index := range store.shards {
 		store.shards[index].entries = make(map[string]entry)
@@ -113,8 +120,8 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 
 	log, err := recoverLog(ctx, store)
 	if err != nil {
-		_ = unlockFile(ownershipFile)
-		_ = ownershipFile.Close()
+		_ = releaseDirectoryLock(lockFile)
+		_ = lockFile.Close()
 		return nil, err
 	}
 	go store.runWriter(log, options)
@@ -212,7 +219,7 @@ func (store *Store) Close() error {
 
 	writerErr := <-request.result
 	<-store.done
-	unlockErr := unlockFile(store.lockFile)
+	unlockErr := releaseDirectoryLock(store.lockFile)
 	closeErr := store.lockFile.Close()
 	return errors.Join(writerErr, unlockErr, closeErr)
 }

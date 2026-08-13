@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"os"
 	"syscall"
 	"unsafe"
@@ -9,6 +10,7 @@ import (
 const (
 	lockFileFailImmediately = 0x00000001
 	lockFileExclusiveLock   = 0x00000002
+	errorLockViolation      = syscall.Errno(33)
 )
 
 var (
@@ -17,7 +19,7 @@ var (
 	unlockFileExProc = kernel32DLL.NewProc("UnlockFileEx")
 )
 
-func lockFile(file *os.File) error {
+func acquireDirectoryLock(file *os.File) error {
 	var overlapped syscall.Overlapped
 	result, _, err := lockFileExProc.Call(
 		file.Fd(),
@@ -28,12 +30,15 @@ func lockFile(file *os.File) error {
 		uintptr(unsafe.Pointer(&overlapped)),
 	)
 	if result == 0 {
+		if errors.Is(err, errorLockViolation) {
+			return errDirectoryLockHeld
+		}
 		return err
 	}
 	return nil
 }
 
-func unlockFile(file *os.File) error {
+func releaseDirectoryLock(file *os.File) error {
 	var overlapped syscall.Overlapped
 	result, _, err := unlockFileExProc.Call(
 		file.Fd(),

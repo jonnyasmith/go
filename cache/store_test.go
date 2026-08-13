@@ -97,8 +97,13 @@ func TestStoreDirectoryHasOneOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	_, err = cache.Open(ctx, dir)
-	if err == nil || !strings.Contains(err.Error(), dir) {
+	second, err := cache.Open(ctx, dir)
+	if err == nil {
+		_ = second.Close()
+		_ = first.Close()
+		t.Fatal("second open succeeded; want ownership error")
+	}
+	if !strings.Contains(err.Error(), dir) {
 		_ = first.Close()
 		t.Fatalf("second open error = %v; want directory", err)
 	}

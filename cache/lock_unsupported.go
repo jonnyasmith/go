@@ -1,4 +1,4 @@
-//go:build !aix && !android && !darwin && !dragonfly && !freebsd && !illumos && !linux && !netbsd && !openbsd && !solaris && !windows
+//go:build !android && !darwin && !dragonfly && !freebsd && !illumos && !ios && !linux && !netbsd && !openbsd && !windows
 
 package cache
 
@@ -8,10 +8,10 @@ import (
 	"runtime"
 )
 
-func lockFile(*os.File) error {
+func acquireDirectoryLock(*os.File) error {
 	return fmt.Errorf("file locking is unsupported on %s", runtime.GOOS)
 }
 
-func unlockFile(*os.File) error {
+func releaseDirectoryLock(*os.File) error {
 	return nil
 }
