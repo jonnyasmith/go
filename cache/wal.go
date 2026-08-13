@@ -49,9 +49,10 @@ type writeRequest struct {
 }
 
 type logState struct {
-	file   *os.File
-	offset int64
-	seq    uint64
+	file               *os.File
+	offset             int64
+	seq                uint64
+	bytesSinceSnapshot int64
 }
 
 func (store *Store) runWriter(log *logState, options options) {
@@ -75,6 +76,10 @@ func (store *Store) runWriter(log *logState, options options) {
 			case requestSet, requestDelete:
 				batch, control := store.drainWrites(request)
 				store.writeBatch(log, options.segmentSize, batch)
+				if log.bytesSinceSnapshot >= options.snapshotThreshold {
+					store.startSnapshot()
+					log.bytesSinceSnapshot = 0
+				}
 				if control != nil && store.handleControl(log, control) {
 					return
 				}
@@ -123,6 +128,7 @@ func (store *Store) handleControl(log *logState, request *writeRequest) bool {
 		store.stats.fsyncs.Add(1)
 	}
 	if request.kind == requestClose {
+		store.snapshotWG.Wait()
 		err = errors.Join(err, log.file.Close())
 	}
 	request.result <- err
@@ -167,14 +173,16 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 		}
 
 		log.offset += int64(written)
+		log.bytesSinceSnapshot += int64(written)
 		for index := first; index < last; index++ {
 			log.seq++
 			request := requests[index]
 			if request.kind == requestSet {
-				store.applySet(request.key, request.value, request.deadline)
+				store.applySet(request.key, request.value, request.deadline, log.seq)
 			} else {
 				store.applyDelete(request.key)
 			}
+			store.logSequence.Store(log.seq)
 			store.stats.recordsWritten.Add(1)
 			request.result <- nil
 		}

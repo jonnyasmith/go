@@ -23,12 +23,13 @@ type entry struct {
 	key      string
 	value    []byte
 	deadline int64
+	sequence uint64
 	previous *entry
 	next     *entry
 }
 
 type shard struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	entries  map[string]*entry
 	recent   *entry
 	oldest   *entry
@@ -48,6 +49,7 @@ type counters struct {
 	recordsWritten atomic.Uint64
 	bytesWritten   atomic.Uint64
 	fsyncs         atomic.Uint64
+	snapshots      atomic.Uint64
 	lastError      atomic.Pointer[errorState]
 }
 
@@ -81,6 +83,11 @@ type Store struct {
 	done      chan struct{}
 	sweepStop chan struct{}
 	sweepDone chan struct{}
+
+	logSequence     atomic.Uint64
+	snapshotRunning atomic.Bool
+	snapshotMu      sync.Mutex
+	snapshotWG      sync.WaitGroup
 
 	lockFile *os.File
 }
@@ -214,6 +221,7 @@ func (store *Store) Stats() Stats {
 		RecordsWritten: store.stats.recordsWritten.Load(),
 		BytesWritten:   store.stats.bytesWritten.Load(),
 		Fsyncs:         store.stats.fsyncs.Load(),
+		Snapshots:      store.stats.snapshots.Load(),
 	}
 	if failure := store.stats.lastError.Load(); failure != nil {
 		stats.LastError = failure.err.Error()
