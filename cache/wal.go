@@ -155,8 +155,8 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 			respondAll(requests[first:], failure)
 			return
 		}
-		nextRecord := encodeRecord(log.seq+1, requests[first])
-		if log.offset > segmentHeaderSize && log.offset+int64(len(nextRecord)) > segmentSize {
+		firstSize := recordSizeFor(requests[first])
+		if log.offset > segmentHeaderSize && log.offset+int64(firstSize) > segmentSize {
 			if err := store.rollSegment(log, log.seq+1); err != nil {
 				failure := store.latch(err)
 				respondAll(requests[first:], failure)
@@ -164,20 +164,23 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 			}
 		}
 
-		payload := make([]byte, 0, len(nextRecord)*(len(requests)-first))
+		payloadSize := 0
 		last := first
 		for last < len(requests) {
 			if uint64(last-first) >= maxSequence-log.seq {
 				break
 			}
-			record := encodeRecord(log.seq+uint64(last-first)+1, requests[last])
-			if last > first && log.offset+int64(len(payload)) > segmentSize {
+			if last > first && log.offset+int64(payloadSize) > segmentSize {
 				break
 			}
-			payload = append(payload, record...)
+			payloadSize += recordSizeFor(requests[last])
 			last++
 		}
 
+		payload := make([]byte, 0, payloadSize)
+		for index := first; index < last; index++ {
+			payload = appendRecord(payload, log.seq+uint64(index-first)+1, requests[index])
+		}
 		written, err := store.files.Load().writeWAL(log.file, payload)
 		if err == nil && written != len(payload) {
 			err = io.ErrShortWrite
@@ -229,10 +232,16 @@ func respondAll(requests []*writeRequest, err error) {
 	}
 }
 
-func encodeRecord(sequence uint64, request *writeRequest) []byte {
-	length := recordFixedSize + len(request.key) + len(request.value)
-	record := make([]byte, length)
-	binary.LittleEndian.PutUint32(record[:recordCRCOffset], uint32(length-segmentLengthSize))
+func recordSizeFor(request *writeRequest) int {
+	return recordFixedSize + len(request.key) + len(request.value)
+}
+
+func appendRecord(dst []byte, sequence uint64, request *writeRequest) []byte {
+	start := len(dst)
+	// Extending with a zeroed slice lets append reuse caller capacity without a temporary allocation.
+	dst = append(dst, make([]byte, recordSizeFor(request))...)
+	record := dst[start:]
+	binary.LittleEndian.PutUint32(record[:recordCRCOffset], uint32(len(record)-segmentLengthSize))
 	if request.kind == requestSet {
 		record[recordOpOffset] = opSet
 	} else {
@@ -244,7 +253,7 @@ func encodeRecord(sequence uint64, request *writeRequest) []byte {
 	copy(record[recordKeyOffset:], request.key)
 	copy(record[recordKeyOffset+len(request.key):], request.value)
 	binary.LittleEndian.PutUint32(record[recordCRCOffset:recordOpOffset], crc32.Checksum(record[recordOpOffset:], crcTable))
-	return record
+	return dst
 }
 
 func (store *Store) createSegment(firstSequence uint64) (*os.File, error) {

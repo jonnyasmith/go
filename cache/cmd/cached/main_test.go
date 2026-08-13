@@ -16,6 +16,54 @@ import (
 	cache "github.com/jonnyasmith/go/cache"
 )
 
+func TestHelpExitsSuccessfully(t *testing.T) {
+	for _, mode := range []string{"repl", "load"} {
+		t.Run(mode, func(t *testing.T) {
+			var output, diagnostics bytes.Buffer
+			err := run(context.Background(), []string{mode, "-h"}, strings.NewReader(""), &output, &diagnostics)
+			if err != nil {
+				t.Fatalf("%s help: %v", mode, err)
+			}
+			if !strings.Contains(diagnostics.String(), "Usage of "+mode+":") {
+				t.Fatalf("%s help output = %q", mode, diagnostics.String())
+			}
+			if strings.Contains(diagnostics.String(), "flag: help requested") {
+				t.Fatalf("%s help contains flag error: %q", mode, diagnostics.String())
+			}
+		})
+	}
+}
+
+func TestREPLGrammarRejectsMalformedAndWhitespaceValues(t *testing.T) {
+	store, err := cache.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, test := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "malformed get", line: "get key extra", want: "usage: get KEY"},
+		{name: "whitespace value", line: "set key two words", want: "parse TTL"},
+		{name: "misplaced TTL", line: "set key 1h value", want: "parse TTL"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if _, err := executeREPL(store, test.line, &output); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("execute %q error = %v; want %q", test.line, err, test.want)
+			}
+		})
+	}
+
+	var output bytes.Buffer
+	if _, err := executeREPL(store, "set key value 1h", &output); err != nil {
+		t.Fatalf("valid TTL placement: %v", err)
+	}
+}
+
 func TestREPLDrivesStoreCommands(t *testing.T) {
 	binary := buildCached(t)
 	dir := t.TempDir()

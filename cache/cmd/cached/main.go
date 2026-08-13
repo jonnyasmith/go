@@ -88,6 +88,9 @@ func runREPL(ctx context.Context, args []string, input io.Reader, output, diagno
 	flags.SetOutput(diagnostics)
 	config := addStoreFlags(flags)
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	store, err := config.open(ctx)
@@ -225,6 +228,9 @@ func runLoad(ctx context.Context, args []string, output, diagnostics io.Writer) 
 	flags.IntVar(&config.valueBytes, "value-bytes", 0, "fixed value size (zero uses the key)")
 	flags.DurationVar(&config.ttl, "ttl", 0, "TTL for writes (zero disables TTL)")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if config.readPercent < 0 || config.readPercent > 100 {

@@ -61,6 +61,8 @@ Directory ownership is supported on Windows and on the Unix targets named by the
 
 **No context on the data path.** `Get` performs no I/O and a `Set` that has been accepted cannot be un-accepted, so cancellation would be decoration. `Open` takes a context, which bounds recovery.
 
+**Reads remain valid after `Close`.** `Get`, `GetInto`, `Len`, `Bytes`, and `Stats` operate on a detached, stale in-memory view after directory ownership is released. They never observe writes made by a store that later reopens the directory. Read-time TTL expiry still removes expired entries, and `Get`/`GetInto` still update recency and activity counters; mutation and synchronization methods return `ErrClosed`.
+
 ## Two behaviours that surprise people
 
 **An entry evicted for space comes back after a restart.** Eviction is a decision about *memory*, not about *data*, so nothing durable records it. The log still contains the entry, and recovery restores it. Expired entries never come back, because deadlines are durable and evaluated on every read.
@@ -103,9 +105,9 @@ The byte-level layout is specified in [docs/on-disk-format.md](docs/on-disk-form
 
 ## Command
 
-`cmd/cached repl -dir DIRECTORY` opens a terminal REPL. Commands are `set KEY VALUE [TTL]`, `get KEY`, `delete KEY`, `stats`, `sync`, and `quit`; TTLs use Go duration syntax such as `30s` or `5m`.
+`cmd/cached repl -dir DIRECTORY` opens a terminal REPL. Commands are `set KEY VALUE [TTL]`, `get KEY`, `delete KEY`, `stats`, `sync`, and `quit`; TTLs use Go duration syntax such as `30s` or `5m`. Keys and values are single whitespace-delimited tokens: quoting and escaping are not supported, so values containing whitespace cannot be represented.
 
-`cmd/cached load -dir DIRECTORY -read-percent 90 -workers 8` drives a configurable concurrent read/write mix until interrupted. `-keyspace`, `-capacity`, `-shards`, `-snapshot-threshold`, `-value-bytes`, and `-ttl` make expiry, eviction, snapshot installation, and shutdown observable under load. Interrupt and termination signals stop the workload, run the store's full close sequence, and report whether closure succeeded. The command opens no listener and implements no wire protocol.
+`cmd/cached load -dir DIRECTORY -read-percent 90 -workers 8` drives a configurable concurrent read/write mix until interrupted. `-keyspace`, `-capacity`, `-shards`, `-snapshot-threshold`, `-value-bytes`, and `-ttl` make expiry, eviction, snapshot installation, and shutdown observable under load. A 100% read workload reads only the store as it already exists; the command does not prewarm or create keys. Interrupt and termination signals stop the workload, run the store's full close sequence, and report whether closure succeeded. The command opens no listener and implements no wire protocol.
 
 ## Dependencies
 
