@@ -41,10 +41,11 @@ const (
 )
 
 type writeRequest struct {
-	kind   requestKind
-	key    string
-	value  []byte
-	result chan error
+	kind     requestKind
+	key      string
+	value    []byte
+	deadline int64
+	result   chan error
 }
 
 type logState struct {
@@ -170,7 +171,7 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 			log.seq++
 			request := requests[index]
 			if request.kind == requestSet {
-				store.applySet(request.key, request.value)
+				store.applySet(request.key, request.value, request.deadline)
 			} else {
 				store.applyDelete(request.key)
 			}
@@ -215,6 +216,7 @@ func encodeRecord(sequence uint64, request *writeRequest) []byte {
 		record[recordOpOffset] = opDelete
 	}
 	binary.LittleEndian.PutUint16(record[recordKeyLengthOffset:recordDeadlineOffset], uint16(len(request.key)))
+	binary.LittleEndian.PutUint64(record[recordDeadlineOffset:recordSequenceOffset], uint64(request.deadline))
 	binary.LittleEndian.PutUint64(record[recordSequenceOffset:recordKeyOffset], sequence)
 	copy(record[recordKeyOffset:], request.key)
 	copy(record[recordKeyOffset+len(request.key):], request.value)

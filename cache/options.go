@@ -8,14 +8,18 @@ import (
 )
 
 const (
+	defaultCapacity      = uint64(256 << 20)
 	defaultFlushInterval = time.Second
 	defaultSegmentSize   = int64(64 << 20)
+	defaultSweepInterval = time.Second
 )
 
 type options struct {
 	shards        int
+	capacity      uint64
 	flushInterval time.Duration
 	segmentSize   int64
+	sweepInterval time.Duration
 	logger        *slog.Logger
 }
 
@@ -29,6 +33,17 @@ func WithShards(count int) Option {
 			return fmt.Errorf("WithShards: count must be a positive power of two")
 		}
 		options.shards = count
+		return nil
+	}
+}
+
+// WithCapacity sets the byte ceiling across keys, values, and fixed entry overhead.
+func WithCapacity(bytes uint64) Option {
+	return func(options *options) error {
+		if bytes == 0 {
+			return fmt.Errorf("WithCapacity: capacity must be positive")
+		}
+		options.capacity = bytes
 		return nil
 	}
 }
@@ -55,6 +70,17 @@ func WithSegmentSize(size int64) Option {
 	}
 }
 
+// WithSweepInterval sets how often every shard is considered for expired-entry reclamation.
+func WithSweepInterval(interval time.Duration) Option {
+	return func(options *options) error {
+		if interval <= 0 {
+			return fmt.Errorf("WithSweepInterval: interval must be positive")
+		}
+		options.sweepInterval = interval
+		return nil
+	}
+}
+
 // WithLogger sets the logger used for recovery warnings. The Store is silent by default.
 func WithLogger(logger *slog.Logger) Option {
 	return func(options *options) error {
@@ -73,7 +99,9 @@ func defaultOptions() options {
 	}
 	return options{
 		shards:        shards,
+		capacity:      defaultCapacity,
 		flushInterval: defaultFlushInterval,
 		segmentSize:   defaultSegmentSize,
+		sweepInterval: defaultSweepInterval,
 	}
 }

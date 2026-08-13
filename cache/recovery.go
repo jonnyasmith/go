@@ -165,6 +165,7 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 
 		op := payload[recordOpOffset-segmentLengthSize]
 		keyLength := int(binary.LittleEndian.Uint16(payload[recordKeyLengthOffset-segmentLengthSize : recordDeadlineOffset-segmentLengthSize]))
+		deadline := int64(binary.LittleEndian.Uint64(payload[recordDeadlineOffset-segmentLengthSize : recordSequenceOffset-segmentLengthSize]))
 		recordSequence := binary.LittleEndian.Uint64(payload[recordSequenceOffset-segmentLengthSize : recordKeyOffset-segmentLengthSize])
 		keyOffset := recordKeyOffset - segmentLengthSize
 		if keyLength > len(payload)-keyOffset {
@@ -180,8 +181,11 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		value := payload[keyOffset+keyLength:]
 		switch op {
 		case opSet:
-			store.applySet(key, append([]byte(nil), value...))
+			store.applyRecoveredSet(key, append([]byte(nil), value...), deadline)
 		case opDelete:
+			if deadline != 0 {
+				return fail(offset, fmt.Errorf("delete record has a deadline"))
+			}
 			if len(value) != 0 {
 				return fail(offset, fmt.Errorf("delete record has a value"))
 			}

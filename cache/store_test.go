@@ -38,7 +38,7 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	if !ok || string(dst) != "value" {
 		t.Fatalf("get into = %q, %v; want value, true", dst, ok)
 	}
-	if store.Len() != 1 || store.Bytes() != uint64(len("key")+len("value")) {
+	if store.Len() != 1 || store.Bytes() != uint64(64+len("key")+len("value")) {
 		t.Fatalf("size = %d entries, %d bytes", store.Len(), store.Bytes())
 	}
 
@@ -77,8 +77,10 @@ func TestOpenRejectsInvalidOptions(t *testing.T) {
 	ctx := context.Background()
 	for name, option := range map[string]cache.Option{
 		"WithShards":        cache.WithShards(3),
+		"WithCapacity":      cache.WithCapacity(63),
 		"WithFlushInterval": cache.WithFlushInterval(0),
 		"WithSegmentSize":   cache.WithSegmentSize(0),
+		"WithSweepInterval": cache.WithSweepInterval(0),
 		"WithLogger":        cache.WithLogger(nil),
 	} {
 		t.Run(name, func(t *testing.T) {

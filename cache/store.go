@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -19,12 +20,20 @@ var (
 )
 
 type entry struct {
-	value []byte
+	key      string
+	value    []byte
+	deadline int64
+	previous *entry
+	next     *entry
 }
 
 type shard struct {
-	mu      sync.RWMutex
-	entries map[string]entry
+	mu       sync.Mutex
+	entries  map[string]*entry
+	recent   *entry
+	oldest   *entry
+	bytes    uint64
+	capacity uint64
 }
 
 type errorState struct {
@@ -34,6 +43,8 @@ type errorState struct {
 type counters struct {
 	hits           atomic.Uint64
 	misses         atomic.Uint64
+	expiries       atomic.Uint64
+	evictions      atomic.Uint64
 	recordsWritten atomic.Uint64
 	bytesWritten   atomic.Uint64
 	fsyncs         atomic.Uint64
@@ -64,10 +75,12 @@ type Store struct {
 	bytes     atomic.Int64
 	stats     counters
 
-	stateMu  sync.RWMutex
-	closed   bool
-	requests chan *writeRequest
-	done     chan struct{}
+	stateMu   sync.RWMutex
+	closed    bool
+	requests  chan *writeRequest
+	done      chan struct{}
+	sweepStop chan struct{}
+	sweepDone chan struct{}
 
 	lockFile *os.File
 }
@@ -85,6 +98,9 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		if err := option(&options); err != nil {
 			return nil, fmt.Errorf("cache: invalid option: %w", err)
 		}
+	}
+	if options.capacity/uint64(options.shards) < entryOverhead {
+		return nil, fmt.Errorf("cache: invalid option: WithCapacity: capacity per shard must be at least %d bytes", entryOverhead)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("cache: recover %q: %w", dir, err)
@@ -105,6 +121,7 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		return nil, fmt.Errorf("cache: lock store directory %q: %w", dir, err)
 	}
 
+	shardCapacity := options.capacity / uint64(options.shards)
 	store := &Store{
 		dir:       dir,
 		logger:    options.logger,
@@ -112,10 +129,13 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		shardMask: uint64(options.shards - 1),
 		requests:  make(chan *writeRequest, 1024),
 		done:      make(chan struct{}),
+		sweepStop: make(chan struct{}),
+		sweepDone: make(chan struct{}),
 		lockFile:  lockFile,
 	}
 	for index := range store.shards {
-		store.shards[index].entries = make(map[string]entry)
+		store.shards[index].entries = make(map[string]*entry)
+		store.shards[index].capacity = shardCapacity
 	}
 
 	log, err := recoverLog(ctx, store)
@@ -124,39 +144,20 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		_ = lockFile.Close()
 		return nil, err
 	}
+	store.enforceRecoveredState(time.Now().UnixNano())
 	go store.runWriter(log, options)
+	go store.runSweep(options.sweepInterval)
 	return store, nil
 }
 
 // Get returns a copy of the value for key and whether it is present.
 func (store *Store) Get(key string) ([]byte, bool) {
-	shard := store.shardFor(key)
-	shard.mu.RLock()
-	entry, ok := shard.entries[key]
-	if !ok {
-		shard.mu.RUnlock()
-		store.stats.misses.Add(1)
-		return nil, false
-	}
-	value := append([]byte(nil), entry.value...)
-	shard.mu.RUnlock()
-	store.stats.hits.Add(1)
-	return value, true
+	return store.getInto(key, nil)
 }
 
+// GetInto appends the value for key to dst[:0] and reports whether it is present.
 func (store *Store) GetInto(key string, dst []byte) ([]byte, bool) {
-	shard := store.shardFor(key)
-	shard.mu.RLock()
-	entry, ok := shard.entries[key]
-	if !ok {
-		shard.mu.RUnlock()
-		store.stats.misses.Add(1)
-		return dst[:0], false
-	}
-	dst = append(dst[:0], entry.value...)
-	shard.mu.RUnlock()
-	store.stats.hits.Add(1)
-	return dst, true
+	return store.getInto(key, dst)
 }
 
 // Set durably records value under key before making it visible.
@@ -165,6 +166,24 @@ func (store *Store) Set(key string, value []byte) error {
 		return err
 	}
 	return store.submit(&writeRequest{kind: requestSet, key: key, value: append([]byte(nil), value...), result: make(chan error, 1)})
+}
+
+// SetTTL durably records value under key with a positive TTL converted to an accept-time deadline.
+func (store *Store) SetTTL(key string, value []byte, ttl time.Duration) error {
+	if ttl <= 0 {
+		return errors.New("cache: SetTTL: ttl must be positive")
+	}
+	if err := validateRecordSize(key, len(value)); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(ttl).UnixNano()
+	return store.submit(&writeRequest{
+		kind:     requestSet,
+		key:      key,
+		value:    append([]byte(nil), value...),
+		deadline: deadline,
+		result:   make(chan error, 1),
+	})
 }
 
 // Delete durably records removal of key. Deleting an absent key succeeds.
@@ -180,7 +199,7 @@ func (store *Store) Len() uint64 {
 	return store.entries.Load()
 }
 
-// Bytes returns the bytes occupied by stored keys and values.
+// Bytes returns the bytes charged for keys, values, and fixed per-entry overhead.
 func (store *Store) Bytes() uint64 {
 	return uint64(store.bytes.Load())
 }
@@ -190,6 +209,8 @@ func (store *Store) Stats() Stats {
 	stats := Stats{
 		Hits:           store.stats.hits.Load(),
 		Misses:         store.stats.misses.Load(),
+		Expiries:       store.stats.expiries.Load(),
+		Evictions:      store.stats.evictions.Load(),
 		RecordsWritten: store.stats.recordsWritten.Load(),
 		BytesWritten:   store.stats.bytesWritten.Load(),
 		Fsyncs:         store.stats.fsyncs.Load(),
@@ -213,10 +234,12 @@ func (store *Store) Close() error {
 		return nil
 	}
 	store.closed = true
+	close(store.sweepStop)
+	store.stateMu.Unlock()
+	<-store.sweepDone
+
 	request := &writeRequest{kind: requestClose, result: make(chan error, 1)}
 	store.requests <- request
-	store.stateMu.Unlock()
-
 	writerErr := <-request.result
 	<-store.done
 	unlockErr := releaseDirectoryLock(store.lockFile)
@@ -237,34 +260,6 @@ func (store *Store) submit(request *writeRequest) error {
 
 func (store *Store) shardFor(key string) *shard {
 	return &store.shards[hashKey(key)&store.shardMask]
-}
-
-func (store *Store) applySet(key string, value []byte) {
-	shard := store.shardFor(key)
-	shard.mu.Lock()
-	previous, exists := shard.entries[key]
-	shard.entries[key] = entry{value: value}
-	shard.mu.Unlock()
-	if exists {
-		store.bytes.Add(int64(len(value) - len(previous.value)))
-		return
-	}
-	store.entries.Add(1)
-	store.bytes.Add(int64(len(key) + len(value)))
-}
-
-func (store *Store) applyDelete(key string) {
-	shard := store.shardFor(key)
-	shard.mu.Lock()
-	previous, exists := shard.entries[key]
-	if exists {
-		delete(shard.entries, key)
-	}
-	shard.mu.Unlock()
-	if exists {
-		store.entries.Add(^uint64(0))
-		store.bytes.Add(-int64(len(key) + len(previous.value)))
-	}
 }
 
 func validateRecordSize(key string, valueLength int) error {
