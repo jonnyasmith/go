@@ -19,39 +19,73 @@ type segmentFile struct {
 }
 
 func recoverLog(ctx context.Context, store *Store) (*logState, error) {
+	snapshotSequences, err := loadSnapshot(ctx, store)
+	if err != nil {
+		return nil, err
+	}
 	segments, err := listSegments(store.dir)
 	if err != nil {
 		return nil, err
 	}
 	if len(segments) == 0 {
-		file, err := createSegment(store.dir, 1)
+		nextSequence := uint64(1)
+		for _, sequence := range snapshotSequences {
+			if sequence >= nextSequence {
+				nextSequence = sequence + 1
+			}
+		}
+		file, err := createSegment(store.dir, nextSequence)
 		if err != nil {
 			return nil, err
 		}
-		return &logState{file: file, offset: segmentHeaderSize}, nil
+		store.logSequence.Store(nextSequence - 1)
+		return &logState{file: file, offset: segmentHeaderSize, seq: nextSequence - 1}, nil
 	}
 
-	var lastSequence uint64
-	for _, segment := range segments[:len(segments)-1] {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("cache: recover %q: %w", segment.path, err)
+	start := 0
+	previousSequence := uint64(0)
+	if snapshotSequences != nil {
+		lowest := snapshotSequences[0]
+		for _, sequence := range snapshotSequences[1:] {
+			if sequence < lowest {
+				lowest = sequence
+			}
 		}
-		file, _, sequence, err := recoverSegment(ctx, store, segment, false, lastSequence)
+		if segments[0].firstSequence > lowest+1 {
+			return nil, fmt.Errorf("cache: recover %q at offset %d: sequence gap after snapshot sequence %d", segments[0].path, segmentHeaderSize, lowest)
+		}
+		for index, segment := range segments {
+			if segment.firstSequence <= lowest {
+				start = index
+			}
+		}
+		previousSequence = segments[start].firstSequence - 1
+	} else if segments[0].firstSequence > 1 {
+		previousSequence = segments[0].firstSequence - 1
+	}
+
+	var finalFile *os.File
+	var finalOffset int64
+	lastSequence := previousSequence
+	for index := start; index < len(segments); index++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("cache: recover %q: %w", segments[index].path, err)
+		}
+		final := index == len(segments)-1
+		file, offset, sequence, err := recoverSegment(ctx, store, segments[index], final, lastSequence, snapshotSequences)
 		if err != nil {
 			return nil, err
 		}
 		lastSequence = sequence
-		if err := file.Close(); err != nil {
-			return nil, fmt.Errorf("cache: close recovered segment %q: %w", segment.path, err)
+		if final {
+			finalFile = file
+			finalOffset = offset
+		} else if err := file.Close(); err != nil {
+			return nil, fmt.Errorf("cache: close recovered segment %q: %w", segments[index].path, err)
 		}
 	}
-
-	final := segments[len(segments)-1]
-	file, offset, lastSequence, err := recoverSegment(ctx, store, final, true, lastSequence)
-	if err != nil {
-		return nil, err
-	}
-	return &logState{file: file, offset: offset, seq: lastSequence}, nil
+	store.logSequence.Store(lastSequence)
+	return &logState{file: finalFile, offset: finalOffset, seq: lastSequence}, nil
 }
 
 func listSegments(dir string) ([]segmentFile, error) {
@@ -80,7 +114,7 @@ func listSegments(dir string) ([]segmentFile, error) {
 	return segments, nil
 }
 
-func recoverSegment(ctx context.Context, store *Store, segment segmentFile, final bool, previousSequence uint64) (*os.File, int64, uint64, error) {
+func recoverSegment(ctx context.Context, store *Store, segment segmentFile, final bool, previousSequence uint64, snapshotSequences []uint64) (*os.File, int64, uint64, error) {
 	file, err := os.OpenFile(segment.path, os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, 0, previousSequence, fmt.Errorf("cache: open segment %q: %w", segment.path, err)
@@ -179,9 +213,13 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		}
 		key := string(payload[keyOffset : keyOffset+keyLength])
 		value := payload[keyOffset+keyLength:]
+		shardIndex := hashKey(key) & store.shardMask
+		apply := len(snapshotSequences) == 0 || recordSequence > snapshotSequences[shardIndex]
 		switch op {
 		case opSet:
-			store.applyRecoveredSet(key, append([]byte(nil), value...), deadline)
+			if apply {
+				store.applyRecoveredSet(key, append([]byte(nil), value...), deadline, recordSequence)
+			}
 		case opDelete:
 			if deadline != 0 {
 				return fail(offset, fmt.Errorf("delete record has a deadline"))
@@ -189,7 +227,9 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 			if len(value) != 0 {
 				return fail(offset, fmt.Errorf("delete record has a value"))
 			}
-			store.applyDelete(key)
+			if apply {
+				store.applyDelete(key, recordSequence)
+			}
 		default:
 			return fail(offset, fmt.Errorf("unknown operation %d", op))
 		}

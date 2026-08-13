@@ -43,13 +43,25 @@ The value length is derived, never stored. Deadlines are absolute and computed w
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| magic | `[4]byte` | identifies a snapshot |
-| version | `uint16` | |
+| magic | `[4]byte` | `CSNP`, identifying a snapshot |
+| version | `uint16` | `1`; a version above what the binary knows is fatal |
 | flags | `uint16` | reserved, zero |
 | shards | `uint32` | count the snapshot was written with |
 | seq | `uint64 × shards` | sequence reached per shard |
 
-Entries follow, grouped by shard, each encoded as a record body without the `op` field. A snapshot is written to a temporary file, fsynced, and installed by rename.
+Entries follow, grouped by shard:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| length | `uint32` | byte count of everything after this field |
+| crc | `uint32` | CRC32C (Castagnoli) over everything after this field |
+| keyLen | `uint16` | |
+| deadline | `int64` | absolute Unix nanoseconds; `0` means no deadline |
+| seq | `uint64` | sequence of the change represented by the entry |
+| key | `keyLen` bytes | |
+| value | remainder | length derived from `length` |
+
+The snapshot is written to a temporary file, fsynced, and installed by rename.
 
 ## Recovery
 

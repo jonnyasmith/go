@@ -2,7 +2,7 @@
 
 An embeddable key-value store for Go. The durable in-memory store survives process restart, expires stale entries, and stays within a configured memory capacity.
 
-> **Status:** `Open`, map operations, TTL expiry, capacity eviction, bounded sweeping, write-ahead log recovery, synchronization, statistics, and the load-mode command are implemented. Snapshots remain specified but are not yet implemented.
+> **Status:** `Open`, map operations, TTL expiry, capacity eviction, bounded sweeping, segmented write-ahead log recovery, snapshots, synchronization, statistics, and the load-mode command are implemented.
 
 ```go
 c, err := cache.Open(ctx, "/var/lib/myapp/cache",
@@ -75,12 +75,13 @@ Options are passed to `Open` and validated there; an invalid value fails immedia
 | `WithCapacity` | Byte ceiling across the store | 256 MiB |
 | `WithFlushInterval` | The durability window | 1 second |
 | `WithSegmentSize` | When the log rolls to a new file | 64 MiB |
+| `WithSnapshotThreshold` | Log bytes written between automatic snapshots | 256 MiB |
 | `WithSweepInterval` | How often every shard is considered for reclamation | 1 second |
 | `WithLogger` | A `*slog.Logger`; silent by default | no logger |
 
 Capacity is divided evenly across shards and must provide at least the fixed 64-byte overhead per shard. Each entry is charged for its key, value, and that overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats samples while at least one quarter are reclaimed, and spends at most one millisecond in a shard per visit.
 
-Capacity may be changed between runs without invalidating the log; recovery evicts to the new bound before `Open` returns. Snapshot support will also allow shard count changes without losing data; until then recovery always replays the log using the configured shard count.
+Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear if the store later reopens with a larger capacity.
 
 ## Observability
 
@@ -88,7 +89,7 @@ Capacity may be changed between runs without invalidating the log; recovery evic
 
 ## On disk
 
-A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. Recovery loads the snapshot and replays the segments that follow it, so start-up time tracks recent write volume rather than the store's whole history. Superseded segments are deleted once a snapshot is installed.
+A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot, replays from its lowest recorded sequence, and tolerates records already represented in later shards. Snapshots are written automatically after the configured log-byte threshold and on clean shutdown, using a temporary file, fsync, and rename; superseded segments are deleted only after installation.
 
 Damaged files are graded rather than treated alike. An incomplete record at the end of the log is what a crash mid-write looks like: it is trimmed and the store opens. Corruption with valid records after it, or a gap in the sequence, is real data loss: the store refuses to open and names the file and offset. There is no repair mode — a store that silently discards part of its history is worse than one that will not start.
 
@@ -115,7 +116,7 @@ go test -race ./...
 
 ## Status
 
-Lifetime management, byte capacity, and the durable-store core are implemented. Snapshots, the terminal REPL, and configurable load mixes remain planned:
+The durable store, lifetime and capacity management, segmented log, and snapshots are implemented. The terminal REPL and configurable load mixes remain planned:
 
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them

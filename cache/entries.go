@@ -39,31 +39,33 @@ func (store *Store) getInto(key string, dst []byte) ([]byte, bool) {
 	return dst, true
 }
 
-func (store *Store) applySet(key string, value []byte, deadline int64) {
+func (store *Store) applySet(key string, value []byte, deadline int64, sequence uint64) {
 	shard := store.shardFor(key)
 	shard.mu.Lock()
-	current := store.setEntryLocked(shard, key, value, deadline)
+	current := store.setEntryLocked(shard, key, value, deadline, sequence)
 	now := time.Now().UnixNano()
 	if deadlinePassed(current.deadline, now) {
 		store.removeEntryLocked(shard, current, removalExpiry)
 	} else if shard.bytes > shard.capacity {
 		store.evictToCapacityLocked(shard, now)
 	}
+	store.logSequence.Store(sequence)
 	shard.mu.Unlock()
 }
 
-func (store *Store) applyRecoveredSet(key string, value []byte, deadline int64) {
+func (store *Store) applyRecoveredSet(key string, value []byte, deadline int64, sequence uint64) {
 	shard := store.shardFor(key)
 	shard.mu.Lock()
-	_ = store.setEntryLocked(shard, key, value, deadline)
+	_ = store.setEntryLocked(shard, key, value, deadline, sequence)
 	shard.mu.Unlock()
 }
 
-func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadline int64) *entry {
+func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadline int64, sequence uint64) *entry {
 	if current := shard.entries[key]; current != nil {
 		oldSize := entrySize(current)
 		current.value = value
 		current.deadline = deadline
+		current.sequence = sequence
 		newSize := entrySize(current)
 		shard.bytes = shard.bytes - oldSize + newSize
 		store.bytes.Add(int64(newSize) - int64(oldSize))
@@ -71,7 +73,7 @@ func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadl
 		return current
 	}
 
-	current := &entry{key: key, value: value, deadline: deadline}
+	current := &entry{key: key, value: value, deadline: deadline, sequence: sequence}
 	shard.entries[key] = current
 	store.markRecentLocked(shard, current)
 	size := entrySize(current)
@@ -81,12 +83,13 @@ func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadl
 	return current
 }
 
-func (store *Store) applyDelete(key string) {
+func (store *Store) applyDelete(key string, sequence uint64) {
 	shard := store.shardFor(key)
 	shard.mu.Lock()
 	if current := shard.entries[key]; current != nil {
 		store.removeEntryLocked(shard, current, removalDelete)
 	}
+	store.logSequence.Store(sequence)
 	shard.mu.Unlock()
 }
 
