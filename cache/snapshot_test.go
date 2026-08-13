@@ -61,6 +61,27 @@ func TestAutomaticSnapshotBoundsSegmentsAndRecovers(t *testing.T) {
 	}
 }
 
+func TestCloseInstallsFinalSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	store, err := cache.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.Set("key", []byte("value")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	snapshots, err := filepath.Glob(filepath.Join(dir, "*.snap"))
+	if err != nil {
+		t.Fatalf("list snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count = %d; want 1", len(snapshots))
+	}
+}
+
 func TestSnapshotWithDifferentShardCountIsDiscarded(t *testing.T) {
 	dir := t.TempDir()
 	store, err := cache.Open(context.Background(), dir,

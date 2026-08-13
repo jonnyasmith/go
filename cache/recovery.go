@@ -19,7 +19,7 @@ type segmentFile struct {
 }
 
 func recoverLog(ctx context.Context, store *Store) (*logState, error) {
-	snapshotSequences, snapshotLoaded, err := loadSnapshot(ctx, store)
+	snapshotSequences, err := loadSnapshot(ctx, store)
 	if err != nil {
 		return nil, err
 	}
@@ -44,12 +44,15 @@ func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 
 	start := 0
 	previousSequence := uint64(0)
-	if snapshotLoaded {
+	if snapshotSequences != nil {
 		lowest := snapshotSequences[0]
 		for _, sequence := range snapshotSequences[1:] {
 			if sequence < lowest {
 				lowest = sequence
 			}
+		}
+		if segments[0].firstSequence > lowest+1 {
+			return nil, fmt.Errorf("cache: recover %q at offset %d: sequence gap after snapshot sequence %d", segments[0].path, segmentHeaderSize, lowest)
 		}
 		for index, segment := range segments {
 			if segment.firstSequence <= lowest {
@@ -225,7 +228,7 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 				return fail(offset, fmt.Errorf("delete record has a value"))
 			}
 			if apply {
-				store.applyDelete(key)
+				store.applyDelete(key, recordSequence)
 			}
 		default:
 			return fail(offset, fmt.Errorf("unknown operation %d", op))

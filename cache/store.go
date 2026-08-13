@@ -42,15 +42,16 @@ type errorState struct {
 }
 
 type counters struct {
-	hits           atomic.Uint64
-	misses         atomic.Uint64
-	expiries       atomic.Uint64
-	evictions      atomic.Uint64
-	recordsWritten atomic.Uint64
-	bytesWritten   atomic.Uint64
-	fsyncs         atomic.Uint64
-	snapshots      atomic.Uint64
-	lastError      atomic.Pointer[errorState]
+	hits              atomic.Uint64
+	misses            atomic.Uint64
+	expiries          atomic.Uint64
+	evictions         atomic.Uint64
+	recordsWritten    atomic.Uint64
+	bytesWritten      atomic.Uint64
+	fsyncs            atomic.Uint64
+	snapshots         atomic.Uint64
+	lastError         atomic.Pointer[errorState]
+	lastSnapshotError atomic.Pointer[errorState]
 }
 
 // Stats is a point-in-time copy of Store activity counters.
@@ -86,7 +87,6 @@ type Store struct {
 
 	logSequence     atomic.Uint64
 	snapshotRunning atomic.Bool
-	snapshotMu      sync.Mutex
 	snapshotWG      sync.WaitGroup
 
 	lockFile *os.File
@@ -224,6 +224,8 @@ func (store *Store) Stats() Stats {
 		Snapshots:      store.stats.snapshots.Load(),
 	}
 	if failure := store.stats.lastError.Load(); failure != nil {
+		stats.LastError = failure.err.Error()
+	} else if failure := store.stats.lastSnapshotError.Load(); failure != nil {
 		stats.LastError = failure.err.Error()
 	}
 	return stats

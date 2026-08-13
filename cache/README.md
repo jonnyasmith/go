@@ -81,7 +81,7 @@ Options are passed to `Open` and validated there; an invalid value fails immedia
 
 Capacity is divided evenly across shards and must provide at least the fixed 64-byte overhead per shard. Each entry is charged for its key, value, and that overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats samples while at least one quarter are reclaimed, and spends at most one millisecond in a shard per visit.
 
-Capacity and shard count may be changed between runs. A snapshot written with another shard count is discarded and recovery falls back to the oldest retained segment.
+Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear if the store later reopens with a larger capacity.
 
 ## Observability
 
@@ -89,7 +89,7 @@ Capacity and shard count may be changed between runs. A snapshot written with an
 
 ## On disk
 
-A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot, replays from its lowest recorded sequence, and tolerates records already represented in later shards. Snapshots are written to a temporary file, fsynced, and installed by rename; superseded segments are deleted only after installation.
+A store owns a directory containing a lock file, the log as a sequence of segments, and at most one snapshot. Snapshots are assembled one shard at a time and record the log sequence reached by each shard. Recovery loads the snapshot, replays from its lowest recorded sequence, and tolerates records already represented in later shards. Snapshots are written automatically after the configured log-byte threshold and on clean shutdown, using a temporary file, fsync, and rename; superseded segments are deleted only after installation.
 
 Damaged files are graded rather than treated alike. An incomplete record at the end of the log is what a crash mid-write looks like: it is trimmed and the store opens. Corruption with valid records after it, or a gap in the sequence, is real data loss: the store refuses to open and names the file and offset. There is no repair mode — a store that silently discards part of its history is worse than one that will not start.
 

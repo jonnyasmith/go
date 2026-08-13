@@ -76,8 +76,7 @@ func (store *Store) runWriter(log *logState, options options) {
 			case requestSet, requestDelete:
 				batch, control := store.drainWrites(request)
 				store.writeBatch(log, options.segmentSize, batch)
-				if log.bytesSinceSnapshot >= options.snapshotThreshold {
-					store.startSnapshot()
+				if log.bytesSinceSnapshot >= options.snapshotThreshold && store.startSnapshot() {
 					log.bytesSinceSnapshot = 0
 				}
 				if control != nil && store.handleControl(log, control) {
@@ -129,6 +128,12 @@ func (store *Store) handleControl(log *logState, request *writeRequest) bool {
 	}
 	if request.kind == requestClose {
 		store.snapshotWG.Wait()
+		if store.stats.evictions.Load() == 0 {
+			if snapshotErr := store.writeSnapshot(); snapshotErr != nil {
+				store.stats.lastSnapshotError.Store(&errorState{err: snapshotErr})
+				err = errors.Join(err, snapshotErr)
+			}
+		}
 		err = errors.Join(err, log.file.Close())
 	}
 	request.result <- err
@@ -180,9 +185,8 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 			if request.kind == requestSet {
 				store.applySet(request.key, request.value, request.deadline, log.seq)
 			} else {
-				store.applyDelete(request.key)
+				store.applyDelete(request.key, log.seq)
 			}
-			store.logSequence.Store(log.seq)
 			store.stats.recordsWritten.Add(1)
 			request.result <- nil
 		}

@@ -31,23 +31,28 @@ type snapshotFile struct {
 	lowestSequence uint64
 }
 
-func (store *Store) startSnapshot() {
+func (store *Store) startSnapshot() bool {
+	if store.stats.evictions.Load() != 0 {
+		return false
+	}
 	if !store.snapshotRunning.CompareAndSwap(false, true) {
-		return
+		return false
 	}
 	store.snapshotWG.Add(1)
 	go func() {
 		defer store.snapshotWG.Done()
 		defer store.snapshotRunning.Store(false)
-		if err := store.writeSnapshot(); err != nil && store.logger != nil {
-			store.logger.Error("write automatic snapshot", "error", err)
+		if err := store.writeSnapshot(); err != nil {
+			store.stats.lastSnapshotError.Store(&errorState{err: err})
+			if store.logger != nil {
+				store.logger.Error("write automatic snapshot", "error", err)
+			}
 		}
 	}()
+	return true
 }
 
 func (store *Store) writeSnapshot() error {
-	store.snapshotMu.Lock()
-	defer store.snapshotMu.Unlock()
 
 	file, err := os.CreateTemp(store.dir, ".snapshot-*")
 	if err != nil {
@@ -138,19 +143,19 @@ func encodeSnapshotEntry(current *entry) []byte {
 	return record
 }
 
-func loadSnapshot(ctx context.Context, store *Store) ([]uint64, bool, error) {
+func loadSnapshot(ctx context.Context, store *Store) ([]uint64, error) {
 	snapshots, err := listSnapshots(store.dir)
 	if err != nil || len(snapshots) == 0 {
-		return nil, false, err
+		return nil, err
 	}
 	snapshot := snapshots[len(snapshots)-1]
 	file, err := os.Open(snapshot.path)
 	if err != nil {
-		return nil, false, fmt.Errorf("cache: open snapshot %q: %w", snapshot.path, err)
+		return nil, fmt.Errorf("cache: open snapshot %q: %w", snapshot.path, err)
 	}
 	defer file.Close()
-	fail := func(offset int64, cause error) ([]uint64, bool, error) {
-		return nil, false, fmt.Errorf("cache: recover %q at offset %d: %w", snapshot.path, offset, cause)
+	fail := func(offset int64, cause error) ([]uint64, error) {
+		return nil, fmt.Errorf("cache: recover %q at offset %d: %w", snapshot.path, offset, cause)
 	}
 	info, err := file.Stat()
 	if err != nil {
@@ -212,17 +217,17 @@ func loadSnapshot(ctx context.Context, store *Store) ([]uint64, bool, error) {
 		if _, err := file.ReadAt(payload, offset+snapshotLengthSize); err != nil {
 			return fail(offset, err)
 		}
-		expectedCRC := binary.LittleEndian.Uint32(payload[:4])
-		if crc32.Checksum(payload[4:], crcTable) != expectedCRC {
+		expectedCRC := binary.LittleEndian.Uint32(payload[snapshotCRCOffset-snapshotLengthSize : snapshotKeyLengthOffset-snapshotLengthSize])
+		if crc32.Checksum(payload[snapshotKeyLengthOffset-snapshotLengthSize:], crcTable) != expectedCRC {
 			return fail(offset, fmt.Errorf("CRC32C mismatch"))
 		}
-		keyLength := int(binary.LittleEndian.Uint16(payload[4:6]))
+		keyLength := int(binary.LittleEndian.Uint16(payload[snapshotKeyLengthOffset-snapshotLengthSize : snapshotDeadlineOffset-snapshotLengthSize]))
 		keyOffset := snapshotKeyOffset - snapshotLengthSize
 		if keyLength > len(payload)-keyOffset {
 			return fail(offset, fmt.Errorf("key length %d exceeds snapshot entry", keyLength))
 		}
-		deadline := int64(binary.LittleEndian.Uint64(payload[6:14]))
-		sequence := binary.LittleEndian.Uint64(payload[14:22])
+		deadline := int64(binary.LittleEndian.Uint64(payload[snapshotDeadlineOffset-snapshotLengthSize : snapshotSequenceOffset-snapshotLengthSize]))
+		sequence := binary.LittleEndian.Uint64(payload[snapshotSequenceOffset-snapshotLengthSize : snapshotKeyOffset-snapshotLengthSize])
 		key := string(payload[keyOffset : keyOffset+keyLength])
 		snapshotShard := uint64(hashKey(key)) & uint64(shardCount-1)
 		if sequence > sequences[snapshotShard] {
@@ -232,15 +237,9 @@ func loadSnapshot(ctx context.Context, store *Store) ([]uint64, bool, error) {
 		offset = end
 	}
 	if mismatchedShards {
-		if err := file.Close(); err != nil {
-			return fail(0, err)
-		}
-		if err := os.Remove(snapshot.path); err != nil {
-			return fail(0, fmt.Errorf("discard snapshot with %d shards: %w", shardCount, err))
-		}
-		return nil, false, nil
+		return nil, nil
 	}
-	return sequences, true, nil
+	return sequences, nil
 }
 
 func listSnapshots(dir string) ([]snapshotFile, error) {

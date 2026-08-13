@@ -49,6 +49,7 @@ func (store *Store) applySet(key string, value []byte, deadline int64, sequence 
 	} else if shard.bytes > shard.capacity {
 		store.evictToCapacityLocked(shard, now)
 	}
+	store.logSequence.Store(sequence)
 	shard.mu.Unlock()
 }
 
@@ -82,12 +83,13 @@ func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadl
 	return current
 }
 
-func (store *Store) applyDelete(key string) {
+func (store *Store) applyDelete(key string, sequence uint64) {
 	shard := store.shardFor(key)
 	shard.mu.Lock()
 	if current := shard.entries[key]; current != nil {
 		store.removeEntryLocked(shard, current, removalDelete)
 	}
+	store.logSequence.Store(sequence)
 	shard.mu.Unlock()
 }
 

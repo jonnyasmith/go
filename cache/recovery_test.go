@@ -186,14 +186,14 @@ func TestSegmentRolloverPreservesSequenceForRecovery(t *testing.T) {
 			t.Fatalf("set %q: %v", key, err)
 		}
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
 
 	for _, name := range []string{"00000001.seg", "00000002.seg", "00000003.seg"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("stat %s: %v", name, err)
 		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 	recovered, err := cache.Open(context.Background(), dir)
 	if err != nil {
