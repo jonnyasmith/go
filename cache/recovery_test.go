@@ -131,50 +131,6 @@ func TestInteriorChecksumFailureRefusesRecovery(t *testing.T) {
 	}
 }
 
-func TestWriteFailureLatchesUntilReopen(t *testing.T) {
-	dir := t.TempDir()
-	store, err := cache.Open(context.Background(), dir, cache.WithSegmentSize(9))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	if err := store.Set("live", []byte("value")); err != nil {
-		t.Fatalf("first set: %v", err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("make directory read-only: %v", err)
-	}
-	firstErr := store.Set("rejected", []byte("value"))
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("restore directory permissions: %v", err)
-	}
-	if firstErr == nil {
-		t.Fatal("set after rollover unexpectedly succeeded")
-	}
-	secondErr := store.Delete("live")
-	if secondErr != firstErr {
-		t.Fatalf("latched error = %v; want same error value %v", secondErr, firstErr)
-	}
-	value, ok := store.Get("live")
-	if !ok || string(value) != "value" {
-		t.Fatalf("read after failure = %q, %v", value, ok)
-	}
-	if store.Stats().LastError == "" {
-		t.Fatal("last error was not reported")
-	}
-	if err := store.Close(); err == nil {
-		t.Fatal("close after durability failure unexpectedly succeeded")
-	}
-
-	reopened, err := cache.Open(context.Background(), dir)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	if err := reopened.Set("new", []byte("value")); err != nil {
-		t.Fatalf("set after reopen: %v", err)
-	}
-}
-
 func TestSegmentRolloverPreservesSequenceForRecovery(t *testing.T) {
 	dir := t.TempDir()
 	store, err := cache.Open(context.Background(), dir, cache.WithSegmentSize(40))

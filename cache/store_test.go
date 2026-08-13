@@ -40,7 +40,7 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	if !ok || string(dst) != "value" {
 		t.Fatalf("get into = %q, %v; want value, true", dst, ok)
 	}
-	if store.Len() != 1 || store.Bytes() != uint64(64+len("key")+len("value")) {
+	if store.Len() != 1 || store.Bytes() != testEntryOverhead+uint64(len("key")+len("value")) {
 		t.Fatalf("size = %d entries, %d bytes", store.Len(), store.Bytes())
 	}
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -95,8 +96,14 @@ type Store struct {
 	snapshotWG         sync.WaitGroup
 	evictionInterlock  sync.Mutex
 	evictionGeneration uint64
+	recoveryShard      int
 
 	directorySync func(string) error
+	createTemp    func(string, string) (*os.File, error)
+	writeWAL      func(*os.File, []byte) (int, error)
+	syncWAL       func(*os.File) error
+	renameFile    func(string, string) error
+	removeFile    func(string) error
 	lockFile      *os.File
 }
 
@@ -113,7 +120,13 @@ func newStoreState(dir string, logger *slog.Logger, shardCount int, shardCapacit
 		flushDone:     make(chan struct{}),
 		sweepStop:     make(chan struct{}),
 		sweepDone:     make(chan struct{}),
+		recoveryShard: -1,
 		directorySync: syncDirectory,
+		createTemp:    os.CreateTemp,
+		writeWAL:      func(file *os.File, payload []byte) (int, error) { return file.Write(payload) },
+		syncWAL:       func(file *os.File) error { return file.Sync() },
+		renameFile:    os.Rename,
+		removeFile:    os.Remove,
 		lockFile:      lockFile,
 	}
 	for index := range store.shards {
@@ -161,6 +174,11 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 
 	shardCapacity := options.capacity / uint64(options.shards)
 	store := newStoreState(dir, options.logger, options.shards, shardCapacity, lockFile)
+	if err := store.removeTemporaryFiles(); err != nil {
+		_ = releaseDirectoryLock(lockFile)
+		_ = lockFile.Close()
+		return nil, err
+	}
 
 	log, err := recoverLog(ctx, store)
 	if err != nil {
@@ -172,6 +190,25 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 	go store.runWriter(log, options)
 	go store.runSweep(options.sweepInterval)
 	return store, nil
+}
+
+func (store *Store) removeTemporaryFiles() error {
+	entries, err := os.ReadDir(store.dir)
+	if err != nil {
+		return fmt.Errorf("cache: read directory %q while removing temporary files: %w", store.dir, err)
+	}
+	for _, item := range entries {
+		name := item.Name()
+		if item.IsDir() || item.Type()&os.ModeType != 0 ||
+			(!strings.HasPrefix(name, ".segment-") && !strings.HasPrefix(name, ".snapshot-")) {
+			continue
+		}
+		path := filepath.Join(store.dir, name)
+		if err := store.removeFile(path); err != nil {
+			return fmt.Errorf("cache: remove stale temporary file %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // Get returns a copy of the value for key and whether it is present.

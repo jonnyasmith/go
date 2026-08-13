@@ -7,11 +7,24 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unsafe"
 
 	cache "github.com/jonnyasmith/go/cache"
 )
 
-const smallEntryBytes = uint64(66) // one-byte key, one-byte value, and the documented 64-byte overhead
+type testEntryRepresentation struct {
+	key      string
+	value    []byte
+	deadline int64
+	sequence uint64
+	previous *testEntryRepresentation
+	next     *testEntryRepresentation
+}
+
+const (
+	testEntryOverhead = uint64(unsafe.Sizeof(testEntryRepresentation{}))
+	smallEntryBytes   = testEntryOverhead + 2
+)
 
 func TestSetTTLPersistsAbsoluteDeadlineAndRecoveryExpiresIt(t *testing.T) {
 	dir := t.TempDir()

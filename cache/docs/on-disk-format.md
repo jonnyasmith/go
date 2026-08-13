@@ -69,15 +69,16 @@ Entries follow, grouped by shard:
 | key | `keyLen` bytes | |
 | value | remainder | length derived from `length` |
 
-The snapshot is written to a temporary file and fsynced. Before any eviction, serialization records the eviction generation before reading shards; installation takes the eviction-path interlock and validates that generation before rename, and an attempt overlapping a live-entry eviction is discarded without installing the snapshot or pruning segments. After an eviction, automatic compaction rolls the active WAL, reconstructs the durable image through that immutable prefix, and installs a snapshot whose equal shard sequences identify the exact covered boundary. Concurrent writes continue in the new segment, and pruning cannot remove that segment or any newer record. A successful rename is followed by the platform-specific directory installation behavior above.
+The snapshot is written to a temporary file and fsynced. Before any eviction, serialization records the eviction generation before reading shards; installation takes the eviction-path interlock and validates that generation before rename, and an attempt overlapping a live-entry eviction is discarded without installing the snapshot or pruning segments. After an eviction, automatic compaction rolls the active WAL, reconstructs the durable image through that immutable prefix, and installs a snapshot whose entries represent the durable state rather than the capacity-constrained in-memory state. Final shutdown reconstruction performs that recovery one configured shard at a time, bounding extra live-entry memory by the largest durable shard while reading the snapshot and retained WAL once per shard. A snapshot is counted as successful only after rename, directory sync, superseded-snapshot cleanup, and covered-segment cleanup complete; errors after rename identify the snapshot as already installed.
 
 ## Recovery
 
 1. Take the lock.
-2. Read the newest snapshot as a base image. If its shard count matches the configured count, retain its per-shard sequences for replay skipping. If the count differs, keep the loaded entries as the base image but disable per-shard skipping.
-3. Validate retained history. Without a snapshot, the oldest retained record must be sequence 1. With a snapshot, retained history must begin no later than one past the lowest per-shard sequence and continue through the highest per-shard sequence. No WAL is required only when every per-shard sequence is equal.
-4. Replay segments. Matching shard counts skip records represented by each shard. Changed shard counts skip only the prefix through the lowest sequence, which every snapshot shard safely represents, then replay all retained records.
-5. Drop entries whose deadline has passed, then evict down to the configured capacity.
+2. Remove regular files beginning `.segment-` or `.snapshot-`, the cache-owned temporary names. Do not follow links or remove directories, installed files, the lock, or unrelated names. Any removal error aborts recovery and names the path.
+3. Read the newest snapshot as a base image. If its shard count matches the configured count, retain its per-shard sequences for replay skipping. If the count differs, keep the loaded entries as the base image but disable per-shard skipping.
+4. Validate retained history. Without a snapshot, the oldest retained record must be sequence 1. With a snapshot, retained history must begin no later than one past the lowest per-shard sequence and continue through the highest per-shard sequence. No WAL is required only when every per-shard sequence is equal.
+5. Replay segments. Matching shard counts skip records represented by each shard. Changed shard counts skip only the prefix through the lowest sequence, which every snapshot shard safely represents, then replay all retained records.
+6. Drop entries whose deadline has passed, then evict down to the configured capacity.
 
 ### Failure tiers
 

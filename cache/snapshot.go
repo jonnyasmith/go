@@ -69,7 +69,9 @@ func (store *Store) startSnapshot(log *logState) bool {
 			if store.logger != nil {
 				store.logger.Error("write automatic snapshot", "error", err)
 			}
+			return
 		}
+		store.stats.lastSnapshotError.Store(nil)
 	}()
 	return true
 }
@@ -85,7 +87,45 @@ func (store *Store) writeSnapshot() error {
 }
 
 func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
-	file, err := os.CreateTemp(store.dir, ".snapshot-*")
+	return store.installSnapshot(evictionGeneration, func(file *os.File) (uint64, error) {
+		headerSize := snapshotFixedHeaderSize + int64(len(store.shards))*8
+		header := make([]byte, headerSize)
+		copy(header[:4], snapshotMagic[:])
+		binary.LittleEndian.PutUint16(header[4:6], formatVersion)
+		binary.LittleEndian.PutUint32(header[8:12], uint32(len(store.shards)))
+		if err := writeFull(file, header); err != nil {
+			return 0, fmt.Errorf("cache: write snapshot header %q: %w", file.Name(), err)
+		}
+
+		sequences := make([]uint64, len(store.shards))
+		for index := range store.shards {
+			shard := &store.shards[index]
+			shard.mu.RLock()
+			sequences[index] = store.logSequence.Load()
+			for _, current := range shard.entries {
+				if err := writeFull(file, encodeSnapshotEntry(current)); err != nil {
+					shard.mu.RUnlock()
+					return 0, fmt.Errorf("cache: write snapshot %q: %w", file.Name(), err)
+				}
+			}
+			shard.mu.RUnlock()
+		}
+		lowest := sequences[0]
+		for index, sequence := range sequences {
+			binary.LittleEndian.PutUint64(header[snapshotFixedHeaderSize+int64(index)*8:], sequence)
+			if sequence < lowest {
+				lowest = sequence
+			}
+		}
+		if _, err := file.WriteAt(header, 0); err != nil {
+			return 0, fmt.Errorf("cache: finalize snapshot header %q: %w", file.Name(), err)
+		}
+		return lowest, nil
+	})
+}
+
+func (store *Store) installSnapshot(evictionGeneration uint64, populate func(*os.File) (uint64, error)) error {
+	file, err := store.createTemp(store.dir, ".snapshot-*")
 	if err != nil {
 		return fmt.Errorf("cache: create snapshot temporary file: %w", err)
 	}
@@ -93,7 +133,7 @@ func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
 	removeTemporary := true
 	defer func() {
 		if removeTemporary {
-			_ = os.Remove(temporaryPath)
+			_ = store.removeFile(temporaryPath)
 		}
 	}()
 	fail := func(err error) error {
@@ -103,38 +143,9 @@ func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
 	if err := file.Chmod(0o600); err != nil {
 		return fail(fmt.Errorf("cache: set snapshot permissions %q: %w", temporaryPath, err))
 	}
-
-	headerSize := snapshotFixedHeaderSize + int64(len(store.shards))*8
-	header := make([]byte, headerSize)
-	copy(header[:4], snapshotMagic[:])
-	binary.LittleEndian.PutUint16(header[4:6], formatVersion)
-	binary.LittleEndian.PutUint32(header[8:12], uint32(len(store.shards)))
-	if err := writeFull(file, header); err != nil {
-		return fail(fmt.Errorf("cache: write snapshot header %q: %w", temporaryPath, err))
-	}
-
-	sequences := make([]uint64, len(store.shards))
-	for index := range store.shards {
-		shard := &store.shards[index]
-		shard.mu.RLock()
-		sequences[index] = store.logSequence.Load()
-		for _, current := range shard.entries {
-			if err := writeFull(file, encodeSnapshotEntry(current)); err != nil {
-				shard.mu.RUnlock()
-				return fail(fmt.Errorf("cache: write snapshot %q: %w", temporaryPath, err))
-			}
-		}
-		shard.mu.RUnlock()
-	}
-	lowest := sequences[0]
-	for index, sequence := range sequences {
-		binary.LittleEndian.PutUint64(header[snapshotFixedHeaderSize+int64(index)*8:], sequence)
-		if sequence < lowest {
-			lowest = sequence
-		}
-	}
-	if _, err := file.WriteAt(header, 0); err != nil {
-		return fail(fmt.Errorf("cache: finalize snapshot header %q: %w", temporaryPath, err))
+	lowest, err := populate(file)
+	if err != nil {
+		return fail(err)
 	}
 	if err := file.Sync(); err != nil {
 		return fail(fmt.Errorf("cache: sync snapshot %q: %w", temporaryPath, err))
@@ -142,25 +153,25 @@ func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("cache: close snapshot %q: %w", temporaryPath, err)
 	}
+
 	store.evictionInterlock.Lock()
 	defer store.evictionInterlock.Unlock()
 	if store.evictionGeneration != evictionGeneration {
 		return nil
 	}
-
 	target := filepath.Join(store.dir, snapshotName(lowest))
-	if err := os.Rename(temporaryPath, target); err != nil {
+	if err := store.renameFile(temporaryPath, target); err != nil {
 		return fmt.Errorf("cache: install snapshot %q: %w", target, err)
 	}
 	removeTemporary = false
 	if err := store.directorySync(store.dir); err != nil {
-		return err
+		return fmt.Errorf("cache: snapshot %q is installed but directory sync failed: %w", target, err)
 	}
-	if err := removeOtherSnapshots(store.dir, target); err != nil {
-		return err
+	if err := store.removeOtherSnapshots(target); err != nil {
+		return fmt.Errorf("cache: snapshot %q is installed but cleanup failed: %w", target, err)
 	}
-	if err := deleteSegmentsBefore(store.dir, lowest); err != nil {
-		return err
+	if err := store.deleteSegmentsBefore(lowest); err != nil {
+		return fmt.Errorf("cache: snapshot %q is installed but cleanup failed: %w", target, err)
 	}
 	store.stats.snapshots.Add(1)
 	return nil
@@ -178,6 +189,9 @@ func (store *Store) writeDurableSnapshot(through uint64) error {
 func (store *Store) writeReconstructedSnapshot(reconstruct func(*Store) error) error {
 	recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
 	recovered.directorySync = store.directorySync
+	recovered.createTemp = store.createTemp
+	recovered.renameFile = store.renameFile
+	recovered.removeFile = store.removeFile
 	if err := reconstruct(recovered); err != nil {
 		return err
 	}
@@ -188,7 +202,7 @@ func (store *Store) writeReconstructedSnapshot(reconstruct func(*Store) error) e
 	return nil
 }
 
-func (store *Store) writeFinalSnapshot() error {
+func (store *Store) writeFinalSnapshot(through uint64) error {
 	store.evictionInterlock.Lock()
 	evictionGeneration := store.evictionGeneration
 	store.evictionInterlock.Unlock()
@@ -196,15 +210,32 @@ func (store *Store) writeFinalSnapshot() error {
 		return store.writeSnapshotAt(evictionGeneration)
 	}
 
-	return store.writeReconstructedSnapshot(func(recovered *Store) error {
-		log, err := recoverLog(context.Background(), recovered)
-		if err != nil {
-			return fmt.Errorf("cache: prepare final snapshot: %w", err)
+	return store.installSnapshot(evictionGeneration, func(file *os.File) (uint64, error) {
+		headerSize := snapshotFixedHeaderSize + int64(len(store.shards))*8
+		header := make([]byte, headerSize)
+		copy(header[:4], snapshotMagic[:])
+		binary.LittleEndian.PutUint16(header[4:6], formatVersion)
+		binary.LittleEndian.PutUint32(header[8:12], uint32(len(store.shards)))
+		for index := range store.shards {
+			binary.LittleEndian.PutUint64(header[snapshotFixedHeaderSize+int64(index)*8:], through)
 		}
-		if err := log.file.Close(); err != nil {
-			return fmt.Errorf("cache: close final snapshot recovery log %q: %w", log.file.Name(), err)
+		if err := writeFull(file, header); err != nil {
+			return 0, fmt.Errorf("cache: write final snapshot header %q: %w", file.Name(), err)
 		}
-		return nil
+
+		for shardIndex := range store.shards {
+			recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
+			recovered.recoveryShard = shardIndex
+			if err := recoverDurableImage(context.Background(), recovered, through); err != nil {
+				return 0, fmt.Errorf("cache: reconstruct final snapshot shard %d through sequence %d: %w", shardIndex, through, err)
+			}
+			for _, current := range recovered.shards[shardIndex].entries {
+				if err := writeFull(file, encodeSnapshotEntry(current)); err != nil {
+					return 0, fmt.Errorf("cache: write final snapshot %q: %w", file.Name(), err)
+				}
+			}
+		}
+		return through, nil
 	})
 }
 
@@ -311,7 +342,10 @@ func loadSnapshot(ctx context.Context, store *Store) (snapshotState, error) {
 		if sequence > sequences[snapshotShard] {
 			return fail(offset, fmt.Errorf("entry sequence %d exceeds shard sequence %d", sequence, sequences[snapshotShard]))
 		}
-		store.applyRecoveredSet(key, append([]byte(nil), payload[keyOffset+keyLength:]...), deadline, sequence)
+		configuredShard := int(hashKey(key) & store.shardMask)
+		if store.recoveryShard < 0 || configuredShard == store.recoveryShard {
+			store.applyRecoveredSet(key, append([]byte(nil), payload[keyOffset+keyLength:]...), deadline, sequence)
+		}
 		offset = end
 	}
 	return newSnapshotState(sequences, !mismatchedShards), nil
@@ -346,22 +380,22 @@ func listSnapshots(dir string) ([]snapshotFile, error) {
 	return snapshots, nil
 }
 
-func removeOtherSnapshots(dir, retained string) error {
-	entries, err := os.ReadDir(dir)
+func (store *Store) removeOtherSnapshots(retained string) error {
+	entries, err := os.ReadDir(store.dir)
 	if err != nil {
-		return fmt.Errorf("cache: read directory %q: %w", dir, err)
+		return fmt.Errorf("cache: read directory %q: %w", store.dir, err)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".snap") {
 			continue
 		}
-		if _, err := parseSnapshotFilename(dir, name); err != nil {
+		if _, err := parseSnapshotFilename(store.dir, name); err != nil {
 			return err
 		}
-		path := filepath.Join(dir, name)
+		path := filepath.Join(store.dir, name)
 		if path != retained {
-			if err := os.Remove(path); err != nil {
+			if err := store.removeFile(path); err != nil {
 				return fmt.Errorf("cache: remove superseded snapshot %q: %w", path, err)
 			}
 		}
@@ -369,8 +403,8 @@ func removeOtherSnapshots(dir, retained string) error {
 	return nil
 }
 
-func deleteSegmentsBefore(dir string, lowest uint64) error {
-	segments, err := listSegments(dir)
+func (store *Store) deleteSegmentsBefore(lowest uint64) error {
+	segments, err := listSegments(store.dir)
 	if err != nil {
 		return err
 	}
@@ -378,7 +412,7 @@ func deleteSegmentsBefore(dir string, lowest uint64) error {
 		if segments[index+1].firstSequence > lowest {
 			break
 		}
-		if err := os.Remove(segments[index].path); err != nil {
+		if err := store.removeFile(segments[index].path); err != nil {
 			return fmt.Errorf("cache: remove superseded segment %q: %w", segments[index].path, err)
 		}
 	}

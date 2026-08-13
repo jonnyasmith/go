@@ -69,7 +69,7 @@ func (store *Store) runWriter(log *logState, options options) {
 			flushStop = nil
 		case <-ticker.C:
 			if store.stats.lastError.Load() == nil {
-				if err := log.file.Sync(); err != nil {
+				if err := store.syncWAL(log.file); err != nil {
 					store.latch(fmt.Errorf("cache: fsync log: %w", err))
 				} else {
 					store.stats.fsyncs.Add(1)
@@ -121,18 +121,19 @@ func (store *Store) handleControl(log *logState, request *writeRequest) bool {
 	if failure != nil {
 		err = failure.err
 	}
-	if syncErr := log.file.Sync(); syncErr != nil {
+	if syncErr := store.syncWAL(log.file); syncErr != nil {
 		syncErr = fmt.Errorf("cache: fsync log: %w", syncErr)
 		if failure == nil {
-			syncErr = store.latch(syncErr)
+			err = store.latch(syncErr)
+		} else {
+			err = errors.Join(err, syncErr)
 		}
-		err = errors.Join(err, syncErr)
 	} else {
 		store.stats.fsyncs.Add(1)
 	}
 	if request.kind == requestClose {
 		store.snapshotWG.Wait()
-		if snapshotErr := store.writeFinalSnapshot(); snapshotErr != nil {
+		if snapshotErr := store.writeFinalSnapshot(log.seq); snapshotErr != nil {
 			store.stats.lastSnapshotError.Store(&errorState{err: snapshotErr})
 			err = errors.Join(err, snapshotErr)
 		}
@@ -177,7 +178,7 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 			last++
 		}
 
-		written, err := log.file.Write(payload)
+		written, err := store.writeWAL(log.file, payload)
 		if err == nil && written != len(payload) {
 			err = io.ErrShortWrite
 		}
@@ -206,7 +207,7 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 }
 
 func (store *Store) rollSegment(log *logState, firstSequence uint64) error {
-	if err := log.file.Sync(); err != nil {
+	if err := store.syncWAL(log.file); err != nil {
 		return fmt.Errorf("cache: fsync segment %q: %w", log.file.Name(), err)
 	}
 	store.stats.fsyncs.Add(1)
@@ -248,7 +249,7 @@ func encodeRecord(sequence uint64, request *writeRequest) []byte {
 
 func (store *Store) createSegment(firstSequence uint64) (*os.File, error) {
 	path := filepath.Join(store.dir, segmentName(firstSequence))
-	file, err := os.CreateTemp(store.dir, ".segment-*")
+	file, err := store.createTemp(store.dir, ".segment-*")
 	if err != nil {
 		return nil, fmt.Errorf("cache: create segment temporary file for %q: %w", path, err)
 	}
@@ -256,7 +257,7 @@ func (store *Store) createSegment(firstSequence uint64) (*os.File, error) {
 	removeTemporary := true
 	defer func() {
 		if removeTemporary {
-			_ = os.Remove(temporaryPath)
+			_ = store.removeFile(temporaryPath)
 		}
 	}()
 	if err := file.Chmod(0o600); err != nil {
@@ -266,15 +267,15 @@ func (store *Store) createSegment(firstSequence uint64) (*os.File, error) {
 	header := make([]byte, segmentHeaderSize)
 	copy(header[:4], segmentMagic[:])
 	binary.LittleEndian.PutUint16(header[4:6], formatVersion)
-	if _, err := file.Write(header); err != nil {
+	if _, err := store.writeWAL(file, header); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("cache: write segment header %q: %w", temporaryPath, err)
 	}
-	if err := file.Sync(); err != nil {
+	if err := store.syncWAL(file); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("cache: sync segment header %q: %w", temporaryPath, err)
 	}
-	if err := os.Rename(temporaryPath, path); err != nil {
+	if err := store.renameFile(temporaryPath, path); err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("cache: install segment %q: %w", path, err)
 	}
