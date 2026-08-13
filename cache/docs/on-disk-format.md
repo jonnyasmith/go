@@ -18,6 +18,8 @@ Eight-digit names written by earlier binaries remain valid when their stem repre
 
 At most one snapshot is retained; segments below its lowest covered sequence are deleted after it is installed.
 
+On the supported Unix targets, every segment or snapshot rename is followed by an fsync of the store directory. On Windows, the file is fsynced before rename, but directory sync is an explicit fallback no-op because Go's standard library does not portably expose flushable directory handles. Unsupported locking targets reject `Open` before installation can begin.
+
 ## Segment
 
 A segment begins with a header and holds records until it exceeds the segment size, at which point the next record starts a new segment.
@@ -67,7 +69,7 @@ Entries follow, grouped by shard:
 | key | `keyLen` bytes | |
 | value | remainder | length derived from `length` |
 
-The snapshot is written to a temporary file and fsynced. Serialization records the eviction generation before reading shards. Installation takes the eviction-path interlock and validates that generation before rename; an attempt overlapping a live-entry eviction is discarded without installing the snapshot or pruning segments. A successful rename is followed by a directory fsync.
+The snapshot is written to a temporary file and fsynced. Before any eviction, serialization records the eviction generation before reading shards; installation takes the eviction-path interlock and validates that generation before rename, and an attempt overlapping a live-entry eviction is discarded without installing the snapshot or pruning segments. After an eviction, automatic compaction rolls the active WAL, reconstructs the durable image through that immutable prefix, and installs a snapshot whose equal shard sequences identify the exact covered boundary. Concurrent writes continue in the new segment, and pruning cannot remove that segment or any newer record. A successful rename is followed by the platform-specific directory installation behavior above.
 
 ## Recovery
 

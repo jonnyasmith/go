@@ -78,15 +78,17 @@ type Store struct {
 	bytes     atomic.Int64
 	stats     counters
 
-	stateMu   sync.RWMutex
-	closed    bool
-	requests  chan *writeRequest
-	done      chan struct{}
-	flushStop chan struct{}
-	flushDone chan struct{}
-	sweepStop chan struct{}
-	sweepDone chan struct{}
-
+	stateMu            sync.RWMutex
+	closed             bool
+	closeOnce          sync.Once
+	closeDone          chan struct{}
+	closeErr           error
+	requests           chan *writeRequest
+	done               chan struct{}
+	flushStop          chan struct{}
+	flushDone          chan struct{}
+	sweepStop          chan struct{}
+	sweepDone          chan struct{}
 	logSequence        atomic.Uint64
 	snapshotRunning    atomic.Bool
 	snapshotWG         sync.WaitGroup
@@ -105,6 +107,7 @@ func newStoreState(dir string, logger *slog.Logger, shardCount int, shardCapacit
 		shardMask:     uint64(shardCount - 1),
 		requests:      make(chan *writeRequest, 1024),
 		done:          make(chan struct{}),
+		closeDone:     make(chan struct{}),
 		flushStop:     make(chan struct{}),
 		flushDone:     make(chan struct{}),
 		sweepStop:     make(chan struct{}),
@@ -182,7 +185,7 @@ func (store *Store) GetInto(key string, dst []byte) ([]byte, bool) {
 
 // Set durably records value under key before making it visible.
 func (store *Store) Set(key string, value []byte) error {
-	if err := validateRecordSize(key, len(value)); err != nil {
+	if err := store.validateEntrySize(key, len(value)); err != nil {
 		return err
 	}
 	return store.submit(&writeRequest{kind: requestSet, key: key, value: append([]byte(nil), value...), result: make(chan error, 1)})
@@ -193,7 +196,7 @@ func (store *Store) SetTTL(key string, value []byte, ttl time.Duration) error {
 	if ttl <= 0 {
 		return errors.New("cache: SetTTL: ttl must be positive")
 	}
-	if err := validateRecordSize(key, len(value)); err != nil {
+	if err := store.validateEntrySize(key, len(value)); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(ttl).UnixNano()
@@ -251,24 +254,25 @@ func (store *Store) Sync() error {
 
 // Close rejects new writes, drains accepted writes, syncs the log, and releases the directory lock.
 func (store *Store) Close() error {
-	store.stateMu.Lock()
-	if store.closed {
+	store.closeOnce.Do(func() {
+		store.stateMu.Lock()
+		store.closed = true
+		close(store.flushStop)
+		close(store.sweepStop)
 		store.stateMu.Unlock()
-		return nil
-	}
-	store.closed = true
-	close(store.flushStop)
-	close(store.sweepStop)
-	store.stateMu.Unlock()
-	<-store.flushDone
-	<-store.sweepDone
-	request := &writeRequest{kind: requestClose, result: make(chan error, 1)}
-	store.requests <- request
-	writerErr := <-request.result
-	<-store.done
-	unlockErr := releaseDirectoryLock(store.lockFile)
-	closeErr := store.lockFile.Close()
-	return errors.Join(writerErr, unlockErr, closeErr)
+		<-store.flushDone
+		<-store.sweepDone
+		request := &writeRequest{kind: requestClose, result: make(chan error, 1)}
+		store.requests <- request
+		writerErr := <-request.result
+		<-store.done
+		unlockErr := releaseDirectoryLock(store.lockFile)
+		lockFileErr := store.lockFile.Close()
+		store.closeErr = errors.Join(writerErr, unlockErr, lockFileErr)
+		close(store.closeDone)
+	})
+	<-store.closeDone
+	return store.closeErr
 }
 
 func (store *Store) submit(request *writeRequest) error {
@@ -292,6 +296,18 @@ func validateRecordSize(key string, valueLength int) error {
 	}
 	if uint64(recordFixedSize)+uint64(len(key))+uint64(valueLength) > uint64(^uint32(0)) {
 		return fmt.Errorf("cache: record is too large")
+	}
+	return nil
+}
+
+func (store *Store) validateEntrySize(key string, valueLength int) error {
+	if err := validateRecordSize(key, valueLength); err != nil {
+		return err
+	}
+	charged := entryOverhead + uint64(len(key)) + uint64(valueLength)
+	capacity := store.shardFor(key).capacity
+	if charged > capacity {
+		return fmt.Errorf("cache: entry requires %d bytes, exceeds target shard capacity %d", charged, capacity)
 	}
 	return nil
 }

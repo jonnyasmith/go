@@ -102,7 +102,7 @@ func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 			return nil, fmt.Errorf("cache: recover %q: %w", segments[index].path, err)
 		}
 		final := index == len(segments)-1
-		file, offset, sequence, err := recoverSegment(ctx, store, segments[index], final, lastSequence, snapshot)
+		file, offset, sequence, err := recoverSegment(ctx, store, segments[index], final, lastSequence, snapshot, maxSequence)
 		if err != nil {
 			return nil, err
 		}
@@ -120,6 +120,66 @@ func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 	}
 	store.logSequence.Store(lastSequence)
 	return &logState{file: finalFile, offset: finalOffset, seq: lastSequence}, nil
+}
+
+func recoverDurableImage(ctx context.Context, store *Store, through uint64) error {
+	snapshot, err := loadSnapshot(ctx, store)
+	if err != nil {
+		return err
+	}
+	if snapshot.loaded && snapshot.highest > through {
+		return fmt.Errorf("cache: snapshot sequence %d is newer than compaction boundary %d", snapshot.highest, through)
+	}
+	segments, err := listSegments(store.dir)
+	if err != nil {
+		return err
+	}
+
+	start := 0
+	previousSequence := uint64(0)
+	if snapshot.loaded {
+		firstRequired := snapshot.lowest
+		if firstRequired != maxSequence {
+			firstRequired++
+		}
+		if snapshot.highest == through && (len(segments) == 0 || segments[0].firstSequence > through) {
+			store.logSequence.Store(through)
+			return nil
+		}
+		if len(segments) == 0 || segments[0].firstSequence > firstRequired {
+			return fmt.Errorf("cache: sequence gap after snapshot sequence %d while compacting through %d", snapshot.lowest, through)
+		}
+		for index, segment := range segments {
+			if segment.firstSequence <= firstRequired {
+				start = index
+			}
+		}
+		previousSequence = segments[start].firstSequence - 1
+	} else {
+		if len(segments) == 0 || segments[0].firstSequence > 1 {
+			return fmt.Errorf("cache: sequence gap while compacting through %d", through)
+		}
+	}
+
+	lastSequence := previousSequence
+	for index := start; index < len(segments) && segments[index].firstSequence <= through; index++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("cache: compact %q: %w", segments[index].path, err)
+		}
+		file, _, sequence, replayErr := recoverSegment(ctx, store, segments[index], false, lastSequence, snapshot, through)
+		if replayErr != nil {
+			return replayErr
+		}
+		lastSequence = sequence
+		if closeErr := file.Close(); closeErr != nil {
+			return fmt.Errorf("cache: close compacted segment %q: %w", segments[index].path, closeErr)
+		}
+	}
+	if lastSequence != through {
+		return fmt.Errorf("cache: sequence gap while compacting: reached %d, want %d", lastSequence, through)
+	}
+	store.logSequence.Store(through)
+	return nil
 }
 
 func listSegments(dir string) ([]segmentFile, error) {
@@ -171,8 +231,12 @@ func parseSequenceFilename(dir, name, suffix, kind string, allowZero bool) (uint
 	return sequence, nil
 }
 
-func recoverSegment(ctx context.Context, store *Store, segment segmentFile, final bool, previousSequence uint64, snapshot snapshotState) (*os.File, int64, uint64, error) {
-	file, err := os.OpenFile(segment.path, os.O_RDWR, 0o600)
+func recoverSegment(ctx context.Context, store *Store, segment segmentFile, final bool, previousSequence uint64, snapshot snapshotState, through uint64) (*os.File, int64, uint64, error) {
+	flags := os.O_RDONLY
+	if final {
+		flags = os.O_RDWR
+	}
+	file, err := os.OpenFile(segment.path, flags, 0o600)
 	if err != nil {
 		return nil, 0, previousSequence, fmt.Errorf("cache: open segment %q: %w", segment.path, err)
 	}
@@ -258,6 +322,9 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		keyLength := int(binary.LittleEndian.Uint16(payload[recordKeyLengthOffset-segmentLengthSize : recordDeadlineOffset-segmentLengthSize]))
 		deadline := int64(binary.LittleEndian.Uint64(payload[recordDeadlineOffset-segmentLengthSize : recordSequenceOffset-segmentLengthSize]))
 		recordSequence := binary.LittleEndian.Uint64(payload[recordSequenceOffset-segmentLengthSize : recordKeyOffset-segmentLengthSize])
+		if recordSequence > through {
+			break
+		}
 		keyOffset := recordKeyOffset - segmentLengthSize
 		if keyLength > len(payload)-keyOffset {
 			return fail(offset, fmt.Errorf("key length %d exceeds record", keyLength))

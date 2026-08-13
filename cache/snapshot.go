@@ -30,28 +30,47 @@ type snapshotFile struct {
 	lowestSequence uint64
 }
 
-func (store *Store) startSnapshot() bool {
+func (store *Store) startSnapshot(log *logState) bool {
 	if !store.snapshotRunning.CompareAndSwap(false, true) {
 		return false
 	}
 	store.evictionInterlock.Lock()
-	if store.evictionGeneration != 0 {
-		store.evictionInterlock.Unlock()
-		store.snapshotRunning.Store(false)
-		return false
-	}
 	evictionGeneration := store.evictionGeneration
 	store.snapshotWG.Add(1)
 	store.evictionInterlock.Unlock()
+
+	write := func() error {
+		return store.writeSnapshotAt(evictionGeneration)
+	}
+	if evictionGeneration != 0 {
+		through := log.seq
+		if through == maxSequence {
+			store.snapshotWG.Done()
+			store.snapshotRunning.Store(false)
+			return false
+		}
+		if err := store.rollSegment(log, through+1); err != nil {
+			store.snapshotWG.Done()
+			store.snapshotRunning.Store(false)
+			store.latch(err)
+			return false
+		}
+		write = func() error {
+			return store.writeDurableSnapshot(through)
+		}
+	}
+
 	go func() {
 		defer store.snapshotWG.Done()
 		defer store.snapshotRunning.Store(false)
-		if err := store.writeSnapshotAt(evictionGeneration); err != nil {
+		if err := write(); err != nil {
 			store.stats.lastSnapshotError.Store(&errorState{err: err})
 			if store.logger != nil {
 				store.logger.Error("write automatic snapshot", "error", err)
 			}
+			return
 		}
+		store.stats.lastSnapshotError.Store(nil)
 	}()
 	return true
 }
@@ -142,6 +161,19 @@ func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
 		return err
 	}
 	if err := deleteSegmentsBefore(store.dir, lowest); err != nil {
+		return err
+	}
+	store.stats.snapshots.Add(1)
+	return nil
+}
+
+func (store *Store) writeDurableSnapshot(through uint64) error {
+	recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
+	recovered.directorySync = store.directorySync
+	if err := recoverDurableImage(context.Background(), recovered, through); err != nil {
+		return fmt.Errorf("cache: reconstruct durable image through sequence %d: %w", through, err)
+	}
+	if err := recovered.writeSnapshot(); err != nil {
 		return err
 	}
 	store.stats.snapshots.Add(1)
@@ -358,22 +390,6 @@ func writeFull(file *os.File, value []byte) error {
 			return io.ErrShortWrite
 		}
 		value = value[written:]
-	}
-	return nil
-}
-
-func syncDirectory(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("cache: open directory %q for sync: %w", dir, err)
-	}
-	err = file.Sync()
-	closeErr := file.Close()
-	if err != nil {
-		return fmt.Errorf("cache: sync directory %q: %w", dir, err)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("cache: close directory %q after sync: %w", dir, closeErr)
 	}
 	return nil
 }
