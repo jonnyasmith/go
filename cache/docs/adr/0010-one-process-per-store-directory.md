@@ -5,4 +5,4 @@
 ## Consequences
 
 - There is no timeout, no retry, and no stale-lock detection. Unix kernels release `flock` when the process dies or its descriptor closes. Windows also releases byte-range locks after process death or handle close, but Microsoft documents that release after process death may be delayed while system resources are reclaimed; an immediate restart may therefore fail once rather than risk breaking a live lock.
-- A contention error names the directory, because the usual cause is a second copy of the same program. Unsupported targets instead name the missing locking capability.
+- Every lock error names the directory. Contention says it is already open, while unsupported targets additionally name the missing locking capability.
