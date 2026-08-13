@@ -77,7 +77,7 @@ func TestOpenRejectsInvalidOptions(t *testing.T) {
 	ctx := context.Background()
 	for name, option := range map[string]cache.Option{
 		"WithShards":        cache.WithShards(3),
-		"WithCapacity":      cache.WithCapacity(0),
+		"WithCapacity":      cache.WithCapacity(63),
 		"WithFlushInterval": cache.WithFlushInterval(0),
 		"WithSegmentSize":   cache.WithSegmentSize(0),
 		"WithSweepInterval": cache.WithSweepInterval(0),

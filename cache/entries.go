@@ -3,9 +3,10 @@ package cache
 import "time"
 
 const (
-	entryOverhead    = uint64(64)
-	sweepSampleSize  = 20
-	sweepShardBudget = time.Millisecond
+	entryOverhead      = uint64(64)
+	sweepSampleSize    = 20
+	sweepRepeatDivisor = 4
+	sweepShardBudget   = time.Millisecond
 )
 
 type removalKind uint8
@@ -41,13 +42,12 @@ func (store *Store) getInto(key string, dst []byte) ([]byte, bool) {
 func (store *Store) applySet(key string, value []byte, deadline int64) {
 	shard := store.shardFor(key)
 	shard.mu.Lock()
-	store.setEntryLocked(shard, key, value, deadline)
+	current := store.setEntryLocked(shard, key, value, deadline)
 	now := time.Now().UnixNano()
-	if current := shard.entries[key]; current != nil && deadlinePassed(current.deadline, now) {
+	if deadlinePassed(current.deadline, now) {
 		store.removeEntryLocked(shard, current, removalExpiry)
 	} else if shard.bytes > shard.capacity {
-		store.reclaimExpiredLocked(shard, now)
-		store.evictToCapacityLocked(shard)
+		store.evictToCapacityLocked(shard, now)
 	}
 	shard.mu.Unlock()
 }
@@ -55,11 +55,11 @@ func (store *Store) applySet(key string, value []byte, deadline int64) {
 func (store *Store) applyRecoveredSet(key string, value []byte, deadline int64) {
 	shard := store.shardFor(key)
 	shard.mu.Lock()
-	store.setEntryLocked(shard, key, value, deadline)
+	_ = store.setEntryLocked(shard, key, value, deadline)
 	shard.mu.Unlock()
 }
 
-func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadline int64) {
+func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadline int64) *entry {
 	if current := shard.entries[key]; current != nil {
 		oldSize := entrySize(current)
 		current.value = value
@@ -68,7 +68,7 @@ func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadl
 		shard.bytes = shard.bytes - oldSize + newSize
 		store.bytes.Add(int64(newSize) - int64(oldSize))
 		store.markRecentLocked(shard, current)
-		return
+		return current
 	}
 
 	current := &entry{key: key, value: value, deadline: deadline}
@@ -78,6 +78,7 @@ func (store *Store) setEntryLocked(shard *shard, key string, value []byte, deadl
 	shard.bytes += size
 	store.entries.Add(1)
 	store.bytes.Add(int64(size))
+	return current
 }
 
 func (store *Store) applyDelete(key string) {
@@ -94,7 +95,7 @@ func (store *Store) enforceRecoveredState(now int64) {
 		shard := &store.shards[index]
 		shard.mu.Lock()
 		store.reclaimExpiredLocked(shard, now)
-		store.evictToCapacityLocked(shard)
+		store.evictToCapacityLocked(shard, now)
 		shard.mu.Unlock()
 	}
 }
@@ -107,9 +108,13 @@ func (store *Store) reclaimExpiredLocked(shard *shard, now int64) {
 	}
 }
 
-func (store *Store) evictToCapacityLocked(shard *shard) {
+func (store *Store) evictToCapacityLocked(shard *shard, now int64) {
 	for shard.bytes > shard.capacity {
-		store.removeEntryLocked(shard, shard.oldest, removalEviction)
+		kind := removalEviction
+		if deadlinePassed(shard.oldest.deadline, now) {
+			kind = removalExpiry
+		}
+		store.removeEntryLocked(shard, shard.oldest, kind)
 	}
 }
 
@@ -199,7 +204,7 @@ func (store *Store) sweepShard(shard *shard) {
 			}
 		}
 		shard.mu.Unlock()
-		if sampled == 0 || reclaimed*4 < sampled || time.Now().After(budgetEnd) {
+		if sampled == 0 || reclaimed*sweepRepeatDivisor < sampled || time.Now().After(budgetEnd) {
 			return
 		}
 	}

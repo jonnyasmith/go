@@ -55,7 +55,7 @@ A store directory is owned by exactly one process, enforced by a lock file. Two 
 
 **Values are copied in and out.** `Set` copies what you give it and `Get` returns a copy, so no caller can corrupt the store by holding onto a slice. Use `GetInto` with your own buffer in hot loops. This is a correctness property, not a tuning knob.
 
-**Expiry is exact; reclamation is not.** An entry stops being observable the instant its deadline passes, whether or not memory has been reclaimed. A background sweep does the reclaiming in bounded slices so a large store does not stall.
+**Expiry is exact; reclamation is not.** `SetTTL` requires a positive TTL and converts it to an absolute deadline when the call is accepted. An entry stops being observable the instant its deadline passes, whether or not memory has been reclaimed. A background sweep does the reclaiming in bounded slices so a large store does not stall.
 
 **No context on the data path.** `Get` performs no I/O and a `Set` that has been accepted cannot be un-accepted, so cancellation would be decoration. `Open` takes a context, which bounds recovery.
 
@@ -78,7 +78,7 @@ Options are passed to `Open` and validated there; an invalid value fails immedia
 | `WithSweepInterval` | How often every shard is considered for reclamation | 1 second |
 | `WithLogger` | A `*slog.Logger`; silent by default | no logger |
 
-Capacity is divided evenly across shards. Each entry is charged for its key, value, and a fixed 64-byte overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats productive samples, and spends at most one millisecond in a shard per visit.
+Capacity is divided evenly across shards and must provide at least the fixed 64-byte overhead per shard. Each entry is charged for its key, value, and that overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats samples while at least one quarter are reclaimed, and spends at most one millisecond in a shard per visit.
 
 Capacity may be changed between runs without invalidating the log; recovery evicts to the new bound before `Open` returns. Snapshot support will also allow shard count changes without losing data; until then recovery always replays the log using the configured shard count.
 

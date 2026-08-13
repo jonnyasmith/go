@@ -99,6 +99,9 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 			return nil, fmt.Errorf("cache: invalid option: %w", err)
 		}
 	}
+	if options.capacity/uint64(options.shards) < entryOverhead {
+		return nil, fmt.Errorf("cache: invalid option: WithCapacity: capacity per shard must be at least %d bytes", entryOverhead)
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("cache: recover %q: %w", dir, err)
 	}
@@ -165,8 +168,11 @@ func (store *Store) Set(key string, value []byte) error {
 	return store.submit(&writeRequest{kind: requestSet, key: key, value: append([]byte(nil), value...), result: make(chan error, 1)})
 }
 
-// SetTTL durably records value under key with a deadline computed when the call is accepted.
+// SetTTL durably records value under key with a positive TTL converted to an accept-time deadline.
 func (store *Store) SetTTL(key string, value []byte, ttl time.Duration) error {
+	if ttl <= 0 {
+		return errors.New("cache: SetTTL: ttl must be positive")
+	}
 	if err := validateRecordSize(key, len(value)); err != nil {
 		return err
 	}

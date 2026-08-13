@@ -49,6 +49,23 @@ func TestSetTTLPersistsAbsoluteDeadlineAndRecoveryExpiresIt(t *testing.T) {
 	}
 }
 
+func TestSetTTLRejectsNonPositiveLifetime(t *testing.T) {
+	store, err := cache.Open(context.Background(), t.TempDir(), cache.WithShards(1))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for _, ttl := range []time.Duration{0, -time.Second} {
+		if err := store.SetTTL("k", []byte("v"), ttl); err == nil {
+			t.Fatalf("SetTTL with %s succeeded; want error", ttl)
+		}
+	}
+	if store.Len() != 0 || store.Stats().RecordsWritten != 0 {
+		t.Fatalf("rejected TTLs changed store: len %d, stats %+v", store.Len(), store.Stats())
+	}
+}
+
 func TestDeadlineControlsVisibilityBeforeReclamation(t *testing.T) {
 	store, err := cache.Open(context.Background(), t.TempDir(), cache.WithShards(1), cache.WithSweepInterval(time.Hour))
 	if err != nil {
