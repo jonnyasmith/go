@@ -76,6 +76,48 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	}
 }
 
+func TestReadsAfterCloseUseDetachedStaleView(t *testing.T) {
+	dir := t.TempDir()
+	store, err := cache.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := store.Set("key", []byte("before-close")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	value, ok := store.Get("key")
+	if !ok || string(value) != "before-close" {
+		t.Fatalf("get after close = %q, %v", value, ok)
+	}
+	dst, ok := store.GetInto("key", make([]byte, 0, len(value)))
+	if !ok || string(dst) != "before-close" {
+		t.Fatalf("get into after close = %q, %v", dst, ok)
+	}
+	if store.Len() != 1 || store.Bytes() == 0 {
+		t.Fatalf("size after close = %d entries, %d bytes", store.Len(), store.Bytes())
+	}
+	if stats := store.Stats(); stats.Hits != 2 {
+		t.Fatalf("stats after close = %+v; want two hits", stats)
+	}
+
+	reopened, err := cache.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("reopen while reading closed view: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.Set("key", []byte("after-reopen")); err != nil {
+		t.Fatalf("set reopened: %v", err)
+	}
+	value, ok = store.Get("key")
+	if !ok || string(value) != "before-close" {
+		t.Fatalf("closed view after reopened write = %q, %v; want stale value", value, ok)
+	}
+}
+
 func TestClosePersistsEveryConcurrentWriteItAccepts(t *testing.T) {
 	dir := t.TempDir()
 	store, err := cache.Open(context.Background(), dir, cache.WithFlushInterval(time.Hour))

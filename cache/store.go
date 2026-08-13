@@ -83,6 +83,8 @@ var defaultFileOperations = &fileOperations{
 }
 
 // Store is a concurrent in-memory key-value collection backed by a write-ahead log.
+// After Close, its read APIs remain valid against a detached, stale in-memory view
+// that no longer owns or observes changes to the directory.
 type Store struct {
 	dir    string
 	logger *slog.Logger
@@ -217,11 +219,13 @@ func (store *Store) removeTemporaryFiles() error {
 }
 
 // Get returns a copy of the value for key and whether it is present.
+// It remains valid after Close against the detached view; TTL expiry still applies.
 func (store *Store) Get(key string) ([]byte, bool) {
 	return store.getInto(key, nil)
 }
 
 // GetInto appends the value for key to dst[:0] and reports whether it is present.
+// It remains valid after Close against the detached view; TTL expiry still applies.
 func (store *Store) GetInto(key string, dst []byte) ([]byte, bool) {
 	return store.getInto(key, dst)
 }
@@ -260,17 +264,20 @@ func (store *Store) Delete(key string) error {
 	return store.submit(&writeRequest{kind: requestDelete, key: key, result: make(chan error, 1)})
 }
 
-// Len returns the current number of entries.
+// Len returns the current number of entries. It remains valid after Close and
+// reports the detached view, including any expiry observed by later reads.
 func (store *Store) Len() uint64 {
 	return store.entries.Load()
 }
 
 // Bytes returns the bytes charged for keys, values, and fixed per-entry overhead.
+// It remains valid after Close and reports the detached view.
 func (store *Store) Bytes() uint64 {
 	return uint64(store.bytes.Load())
 }
 
-// Stats returns a consistent-enough atomic snapshot of activity counters.
+// Stats returns a consistent-enough atomic snapshot of activity counters. It
+// remains valid after Close; post-close Get and GetInto calls update its counters.
 func (store *Store) Stats() Stats {
 	stats := Stats{
 		Hits:           store.stats.hits.Load(),
@@ -295,7 +302,9 @@ func (store *Store) Sync() error {
 	return store.submit(&writeRequest{kind: requestSync, result: make(chan error, 1)})
 }
 
-// Close rejects new writes, drains accepted writes, syncs the log, and releases the directory lock.
+// Close rejects new writes, drains accepted writes, syncs the log, and releases
+// directory ownership. Get, GetInto, Len, Bytes, and Stats remain valid on the
+// detached, stale in-memory view and do not observe a later owner's changes.
 func (store *Store) Close() error {
 	store.closeOnce.Do(func() {
 		store.stateMu.Lock()

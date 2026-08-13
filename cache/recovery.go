@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -24,6 +25,8 @@ type snapshotState struct {
 	lowest          uint64
 	highest         uint64
 }
+
+const recoveryReadBufferSize = 64 << 10
 
 func newSnapshotState(sequences []uint64, perShardReplay bool) snapshotState {
 	state := snapshotState{
@@ -252,8 +255,9 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 	if info.Size() < segmentHeaderSize {
 		return fail(0, io.ErrUnexpectedEOF)
 	}
-	header := make([]byte, segmentHeaderSize)
-	if _, err := file.ReadAt(header, 0); err != nil {
+	reader := bufio.NewReaderSize(file, recoveryReadBufferSize)
+	var header [segmentHeaderSize]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return fail(0, err)
 	}
 	if string(header[:4]) != string(segmentMagic[:]) {
@@ -270,11 +274,13 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 	offset := segmentHeaderSize
 	sequence := previousSequence
 	firstRecord := true
+	var lengthBytes [segmentLengthSize]byte
+	var payload []byte
 	for offset < info.Size() {
 		if err := ctx.Err(); err != nil {
 			return fail(offset, err)
 		}
-		if info.Size()-offset < 4 {
+		if info.Size()-offset < segmentLengthSize {
 			if final {
 				if err := file.Truncate(offset); err != nil {
 					return fail(offset, err)
@@ -285,13 +291,12 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 			return fail(offset, io.ErrUnexpectedEOF)
 		}
 
-		lengthBytes := make([]byte, 4)
-		if _, err := file.ReadAt(lengthBytes, offset); err != nil {
+		if _, err := io.ReadFull(reader, lengthBytes[:]); err != nil {
 			return fail(offset, err)
 		}
-		length := int64(binary.LittleEndian.Uint32(lengthBytes))
-		end := offset + 4 + length
-		if length < recordFixedSize-4 || end > info.Size() {
+		length := int64(binary.LittleEndian.Uint32(lengthBytes[:]))
+		end := offset + segmentLengthSize + length
+		if length < recordFixedSize-segmentLengthSize || end > info.Size() {
 			if final {
 				if err := file.Truncate(offset); err != nil {
 					return fail(offset, err)
@@ -301,9 +306,17 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 			}
 			return fail(offset, io.ErrUnexpectedEOF)
 		}
+		if length > int64(^uint(0)>>1) {
+			return fail(offset, fmt.Errorf("record length %d exceeds platform limit", length))
+		}
 
-		payload := make([]byte, length)
-		if _, err := file.ReadAt(payload, offset+4); err != nil {
+		payloadLength := int(length)
+		if cap(payload) < payloadLength {
+			payload = make([]byte, payloadLength)
+		} else {
+			payload = payload[:payloadLength]
+		}
+		if _, err := io.ReadFull(reader, payload); err != nil {
 			return fail(offset, err)
 		}
 		expectedCRC := binary.LittleEndian.Uint32(payload[recordCRCOffset-segmentLengthSize : recordOpOffset-segmentLengthSize])
