@@ -73,7 +73,7 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsInvalidOptionsAndConcurrentOwner(t *testing.T) {
+func TestOpenRejectsInvalidOptions(t *testing.T) {
 	ctx := context.Background()
 	for name, option := range map[string]cache.Option{
 		"WithShards":        cache.WithShards(3),
@@ -88,15 +88,27 @@ func TestOpenRejectsInvalidOptionsAndConcurrentOwner(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestStoreDirectoryHasOneOwner(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
 	first, err := cache.Open(ctx, dir)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
-	t.Cleanup(func() { _ = first.Close() })
 	_, err = cache.Open(ctx, dir)
 	if err == nil || !strings.Contains(err.Error(), dir) {
+		_ = first.Close()
 		t.Fatalf("second open error = %v; want directory", err)
 	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	reopened, err := cache.Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("open after ownership release: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
 }

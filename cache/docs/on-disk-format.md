@@ -7,7 +7,7 @@ All integers are little-endian.
 ## Directory
 
 ```
-<dir>/LOCK               exclusive flock, held for the lifetime of an open store
+<dir>/LOCK               exclusive OS file lock, held for the lifetime of an open store
 <dir>/NNNNNNNN.seg       log segment, named for the sequence of its first record
 <dir>/NNNNNNNN.snap      snapshot, named for the lowest sequence it covers
 ```

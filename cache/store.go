@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 )
 
 // ErrClosed distinguishes writes attempted after a Store has closed.
@@ -90,12 +89,12 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		return nil, fmt.Errorf("cache: create directory %q: %w", dir, err)
 	}
 
-	lockFile, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_CREATE|os.O_RDWR, 0o600)
+	ownershipFile, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cache: open lock for %q: %w", dir, err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = lockFile.Close()
+	if err := lockFile(ownershipFile); err != nil {
+		_ = ownershipFile.Close()
 		return nil, fmt.Errorf("cache: store directory %q is already open: %w", dir, err)
 	}
 
@@ -106,7 +105,7 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		shardMask: uint64(options.shards - 1),
 		requests:  make(chan *writeRequest, 1024),
 		done:      make(chan struct{}),
-		lockFile:  lockFile,
+		lockFile:  ownershipFile,
 	}
 	for index := range store.shards {
 		store.shards[index].entries = make(map[string]entry)
@@ -114,8 +113,8 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 
 	log, err := recoverLog(ctx, store)
 	if err != nil {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = lockFile.Close()
+		_ = unlockFile(ownershipFile)
+		_ = ownershipFile.Close()
 		return nil, err
 	}
 	go store.runWriter(log, options)
@@ -213,7 +212,7 @@ func (store *Store) Close() error {
 
 	writerErr := <-request.result
 	<-store.done
-	unlockErr := syscall.Flock(int(store.lockFile.Fd()), syscall.LOCK_UN)
+	unlockErr := unlockFile(store.lockFile)
 	closeErr := store.lockFile.Close()
 	return errors.Join(writerErr, unlockErr, closeErr)
 }
