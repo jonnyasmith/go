@@ -39,7 +39,8 @@ func WithShards(count int) Option {
 	}
 }
 
-// WithCapacity sets the byte ceiling across keys, values, and fixed entry overhead.
+// WithCapacity sets the charged-byte ceiling across keys, values, and the fixed
+// entry representation. Allocator, map, goroutine, and runtime overhead are not charged.
 func WithCapacity(bytes uint64) Option {
 	return func(options *options) error {
 		if bytes == 0 {

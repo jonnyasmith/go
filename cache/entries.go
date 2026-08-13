@@ -1,9 +1,12 @@
 package cache
 
-import "time"
+import (
+	"time"
+	"unsafe"
+)
 
 const (
-	entryOverhead      = uint64(64)
+	entryOverhead      = uint64(unsafe.Sizeof(entry{}))
 	sweepSampleSize    = 20
 	sweepRepeatDivisor = 4
 	sweepShardBudget   = time.Millisecond

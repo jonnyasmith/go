@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,6 +68,20 @@ type Stats struct {
 	LastError      string
 }
 
+type fileOperations struct {
+	createTemp func(string, string) (*os.File, error)
+	writeWAL   func(*os.File, []byte) (int, error)
+	syncWAL    func(*os.File) error
+	remove     func(string) error
+}
+
+var defaultFileOperations = &fileOperations{
+	createTemp: os.CreateTemp,
+	writeWAL:   func(file *os.File, payload []byte) (int, error) { return file.Write(payload) },
+	syncWAL:    func(file *os.File) error { return file.Sync() },
+	remove:     os.Remove,
+}
+
 // Store is a concurrent in-memory key-value collection backed by a write-ahead log.
 type Store struct {
 	dir    string
@@ -95,8 +110,10 @@ type Store struct {
 	snapshotWG         sync.WaitGroup
 	evictionInterlock  sync.Mutex
 	evictionGeneration uint64
+	recoveryShard      *int
 
 	directorySync func(string) error
+	files         atomic.Pointer[fileOperations]
 	lockFile      *os.File
 }
 
@@ -116,6 +133,7 @@ func newStoreState(dir string, logger *slog.Logger, shardCount int, shardCapacit
 		directorySync: syncDirectory,
 		lockFile:      lockFile,
 	}
+	store.files.Store(defaultFileOperations)
 	for index := range store.shards {
 		store.shards[index].entries = make(map[string]*entry)
 		store.shards[index].capacity = shardCapacity
@@ -161,6 +179,11 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 
 	shardCapacity := options.capacity / uint64(options.shards)
 	store := newStoreState(dir, options.logger, options.shards, shardCapacity, lockFile)
+	if err := store.removeTemporaryFiles(); err != nil {
+		_ = releaseDirectoryLock(lockFile)
+		_ = lockFile.Close()
+		return nil, err
+	}
 
 	log, err := recoverLog(ctx, store)
 	if err != nil {
@@ -172,6 +195,25 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 	go store.runWriter(log, options)
 	go store.runSweep(options.sweepInterval)
 	return store, nil
+}
+
+func (store *Store) removeTemporaryFiles() error {
+	entries, err := os.ReadDir(store.dir)
+	if err != nil {
+		return fmt.Errorf("cache: read directory %q while removing temporary files: %w", store.dir, err)
+	}
+	for _, item := range entries {
+		name := item.Name()
+		if item.IsDir() || item.Type()&os.ModeType != 0 ||
+			(!strings.HasPrefix(name, ".segment-") && !strings.HasPrefix(name, ".snapshot-")) {
+			continue
+		}
+		path := filepath.Join(store.dir, name)
+		if err := store.files.Load().remove(path); err != nil {
+			return fmt.Errorf("cache: remove stale temporary file %q: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // Get returns a copy of the value for key and whether it is present.
