@@ -18,7 +18,7 @@ type segmentFile struct {
 	firstSequence uint64
 }
 
-func recoverLog(ctx context.Context, store *Store, _ int64) (*logState, error) {
+func recoverLog(ctx context.Context, store *Store) (*logState, error) {
 	segments, err := listSegments(store.dir)
 	if err != nil {
 		return nil, err
@@ -32,24 +32,26 @@ func recoverLog(ctx context.Context, store *Store, _ int64) (*logState, error) {
 	}
 
 	var lastSequence uint64
-	for index, segment := range segments {
+	for _, segment := range segments[:len(segments)-1] {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("cache: recover %q: %w", segment.path, err)
 		}
-		final := index == len(segments)-1
-		file, offset, sequence, err := recoverSegment(ctx, store, segment, final, lastSequence)
+		file, _, sequence, err := recoverSegment(ctx, store, segment, false, lastSequence)
 		if err != nil {
 			return nil, err
 		}
 		lastSequence = sequence
-		if final {
-			return &logState{file: file, offset: offset, seq: lastSequence}, nil
-		}
 		if err := file.Close(); err != nil {
 			return nil, fmt.Errorf("cache: close recovered segment %q: %w", segment.path, err)
 		}
 	}
-	panic("unreachable")
+
+	final := segments[len(segments)-1]
+	file, offset, lastSequence, err := recoverSegment(ctx, store, final, true, lastSequence)
+	if err != nil {
+		return nil, err
+	}
+	return &logState{file: file, offset: offset, seq: lastSequence}, nil
 }
 
 func listSegments(dir string) ([]segmentFile, error) {
@@ -149,8 +151,8 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		if _, err := file.ReadAt(payload, offset+4); err != nil {
 			return fail(offset, err)
 		}
-		expectedCRC := binary.LittleEndian.Uint32(payload[:4])
-		if crc32.Checksum(payload[4:], crcTable) != expectedCRC {
+		expectedCRC := binary.LittleEndian.Uint32(payload[recordCRCOffset-segmentLengthSize : recordOpOffset-segmentLengthSize])
+		if crc32.Checksum(payload[recordOpOffset-segmentLengthSize:], crcTable) != expectedCRC {
 			if final && end == info.Size() {
 				if err := file.Truncate(offset); err != nil {
 					return fail(offset, err)
@@ -161,10 +163,11 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 			return fail(offset, fmt.Errorf("CRC32C mismatch"))
 		}
 
-		op := payload[4]
-		keyLength := int(binary.LittleEndian.Uint16(payload[5:7]))
-		recordSequence := binary.LittleEndian.Uint64(payload[15:23])
-		if keyLength > len(payload)-23 {
+		op := payload[recordOpOffset-segmentLengthSize]
+		keyLength := int(binary.LittleEndian.Uint16(payload[recordKeyLengthOffset-segmentLengthSize : recordDeadlineOffset-segmentLengthSize]))
+		recordSequence := binary.LittleEndian.Uint64(payload[recordSequenceOffset-segmentLengthSize : recordKeyOffset-segmentLengthSize])
+		keyOffset := recordKeyOffset - segmentLengthSize
+		if keyLength > len(payload)-keyOffset {
 			return fail(offset, fmt.Errorf("key length %d exceeds record", keyLength))
 		}
 		if recordSequence != sequence+1 {
@@ -173,8 +176,8 @@ func recoverSegment(ctx context.Context, store *Store, segment segmentFile, fina
 		if firstRecord && recordSequence != segment.firstSequence {
 			return fail(offset, fmt.Errorf("segment starts at sequence %d, record is %d", segment.firstSequence, recordSequence))
 		}
-		key := string(payload[23 : 23+keyLength])
-		value := payload[23+keyLength:]
+		key := string(payload[keyOffset : keyOffset+keyLength])
+		value := payload[keyOffset+keyLength:]
 		switch op {
 		case opSet:
 			store.applySet(key, append([]byte(nil), value...))

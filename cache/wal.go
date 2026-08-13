@@ -12,11 +12,18 @@ import (
 )
 
 const (
-	segmentHeaderSize = int64(8)
-	recordFixedSize   = 4 + 4 + 1 + 2 + 8 + 8
-	formatVersion     = uint16(1)
-	opSet             = byte(1)
-	opDelete          = byte(2)
+	segmentHeaderSize     = int64(8)
+	segmentLengthSize     = 4
+	recordCRCOffset       = 4
+	recordOpOffset        = 8
+	recordKeyLengthOffset = 9
+	recordDeadlineOffset  = 11
+	recordSequenceOffset  = 19
+	recordKeyOffset       = 27
+	recordFixedSize       = recordKeyOffset
+	formatVersion         = uint16(1)
+	opSet                 = byte(1)
+	opDelete              = byte(2)
 )
 
 var (
@@ -65,29 +72,31 @@ func (store *Store) runWriter(log *logState, options options) {
 		case request := <-store.requests:
 			switch request.kind {
 			case requestSet, requestDelete:
-				batch := []*writeRequest{request}
-			drain:
-				for {
-					select {
-					case next := <-store.requests:
-						if next.kind != requestSet && next.kind != requestDelete {
-							store.writeBatch(log, options.segmentSize, batch)
-							if store.handleControl(log, next) {
-								return
-							}
-							break drain
-						}
-						batch = append(batch, next)
-					default:
-						store.writeBatch(log, options.segmentSize, batch)
-						break drain
-					}
+				batch, control := store.drainWrites(request)
+				store.writeBatch(log, options.segmentSize, batch)
+				if control != nil && store.handleControl(log, control) {
+					return
 				}
 			case requestSync, requestClose:
 				if store.handleControl(log, request) {
 					return
 				}
 			}
+		}
+	}
+}
+
+func (store *Store) drainWrites(first *writeRequest) ([]*writeRequest, *writeRequest) {
+	batch := []*writeRequest{first}
+	for {
+		select {
+		case request := <-store.requests:
+			if request.kind == requestSync || request.kind == requestClose {
+				return batch, request
+			}
+			batch = append(batch, request)
+		default:
+			return batch, nil
 		}
 	}
 }
@@ -199,33 +208,53 @@ func respondAll(requests []*writeRequest, err error) {
 func encodeRecord(sequence uint64, request *writeRequest) []byte {
 	length := recordFixedSize + len(request.key) + len(request.value)
 	record := make([]byte, length)
-	binary.LittleEndian.PutUint32(record[0:4], uint32(length-4))
+	binary.LittleEndian.PutUint32(record[:recordCRCOffset], uint32(length-segmentLengthSize))
 	if request.kind == requestSet {
-		record[8] = opSet
+		record[recordOpOffset] = opSet
 	} else {
-		record[8] = opDelete
+		record[recordOpOffset] = opDelete
 	}
-	binary.LittleEndian.PutUint16(record[9:11], uint16(len(request.key)))
-	binary.LittleEndian.PutUint64(record[19:27], sequence)
-	copy(record[27:], request.key)
-	copy(record[27+len(request.key):], request.value)
-	binary.LittleEndian.PutUint32(record[4:8], crc32.Checksum(record[8:], crcTable))
+	binary.LittleEndian.PutUint16(record[recordKeyLengthOffset:recordDeadlineOffset], uint16(len(request.key)))
+	binary.LittleEndian.PutUint64(record[recordSequenceOffset:recordKeyOffset], sequence)
+	copy(record[recordKeyOffset:], request.key)
+	copy(record[recordKeyOffset+len(request.key):], request.value)
+	binary.LittleEndian.PutUint32(record[recordCRCOffset:recordOpOffset], crc32.Checksum(record[recordOpOffset:], crcTable))
 	return record
 }
 
 func createSegment(dir string, firstSequence uint64) (*os.File, error) {
 	path := filepath.Join(dir, segmentName(firstSequence))
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	file, err := os.CreateTemp(dir, ".segment-*")
 	if err != nil {
-		return nil, fmt.Errorf("cache: create segment %q: %w", path, err)
+		return nil, fmt.Errorf("cache: create segment temporary file for %q: %w", path, err)
+	}
+	temporaryPath := file.Name()
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("cache: set segment permissions %q: %w", temporaryPath, err)
 	}
 	header := make([]byte, segmentHeaderSize)
 	copy(header[:4], segmentMagic[:])
 	binary.LittleEndian.PutUint16(header[4:6], formatVersion)
 	if _, err := file.Write(header); err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf("cache: write segment header %q: %w", path, err)
+		return nil, fmt.Errorf("cache: write segment header %q: %w", temporaryPath, err)
 	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("cache: sync segment header %q: %w", temporaryPath, err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("cache: install segment %q: %w", path, err)
+	}
+	removeTemporary = false
 	return file, nil
 }
 

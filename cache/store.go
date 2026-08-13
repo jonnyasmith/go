@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -57,7 +58,7 @@ type Store struct {
 	shards    []shard
 	shardMask uint64
 	entries   atomic.Uint64
-	bytes     atomic.Uint64
+	bytes     atomic.Int64
 	stats     counters
 
 	stateMu  sync.RWMutex
@@ -89,7 +90,7 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		return nil, fmt.Errorf("cache: create directory %q: %w", dir, err)
 	}
 
-	lockFile, err := os.OpenFile(dir+string(os.PathSeparator)+"LOCK", os.O_CREATE|os.O_RDWR, 0o600)
+	lockFile, err := os.OpenFile(filepath.Join(dir, "LOCK"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cache: open lock for %q: %w", dir, err)
 	}
@@ -111,7 +112,7 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		store.shards[index].entries = make(map[string]entry)
 	}
 
-	log, err := recoverLog(ctx, store, options.segmentSize)
+	log, err := recoverLog(ctx, store)
 	if err != nil {
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = lockFile.Close()
@@ -125,29 +126,28 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 func (store *Store) Get(key string) ([]byte, bool) {
 	shard := store.shardFor(key)
 	shard.mu.RLock()
-	item, ok := shard.entries[key]
+	entry, ok := shard.entries[key]
 	if !ok {
 		shard.mu.RUnlock()
 		store.stats.misses.Add(1)
 		return nil, false
 	}
-	value := append([]byte(nil), item.value...)
+	value := append([]byte(nil), entry.value...)
 	shard.mu.RUnlock()
 	store.stats.hits.Add(1)
 	return value, true
 }
 
-// GetInto appends the value for key to dst[:0] and reports whether it is present.
 func (store *Store) GetInto(key string, dst []byte) ([]byte, bool) {
 	shard := store.shardFor(key)
 	shard.mu.RLock()
-	item, ok := shard.entries[key]
+	entry, ok := shard.entries[key]
 	if !ok {
 		shard.mu.RUnlock()
 		store.stats.misses.Add(1)
 		return dst[:0], false
 	}
-	dst = append(dst[:0], item.value...)
+	dst = append(dst[:0], entry.value...)
 	shard.mu.RUnlock()
 	store.stats.hits.Add(1)
 	return dst, true
@@ -176,7 +176,7 @@ func (store *Store) Len() uint64 {
 
 // Bytes returns the bytes occupied by stored keys and values.
 func (store *Store) Bytes() uint64 {
-	return store.bytes.Load()
+	return uint64(store.bytes.Load())
 }
 
 // Stats returns a consistent-enough atomic snapshot of activity counters.
@@ -225,9 +225,8 @@ func (store *Store) submit(request *writeRequest) error {
 		return ErrClosed
 	}
 	store.requests <- request
-	err := <-request.result
 	store.stateMu.RUnlock()
-	return err
+	return <-request.result
 }
 
 func (store *Store) shardFor(key string) *shard {
@@ -241,15 +240,11 @@ func (store *Store) applySet(key string, value []byte) {
 	shard.entries[key] = entry{value: value}
 	shard.mu.Unlock()
 	if exists {
-		if len(value) >= len(previous.value) {
-			store.bytes.Add(uint64(len(value) - len(previous.value)))
-		} else {
-			store.bytes.Add(^uint64(len(previous.value) - len(value) - 1))
-		}
+		store.bytes.Add(int64(len(value) - len(previous.value)))
 		return
 	}
 	store.entries.Add(1)
-	store.bytes.Add(uint64(len(key) + len(value)))
+	store.bytes.Add(int64(len(key) + len(value)))
 }
 
 func (store *Store) applyDelete(key string) {
@@ -262,10 +257,7 @@ func (store *Store) applyDelete(key string) {
 	shard.mu.Unlock()
 	if exists {
 		store.entries.Add(^uint64(0))
-		size := len(key) + len(previous.value)
-		if size > 0 {
-			store.bytes.Add(^uint64(size - 1))
-		}
+		store.bytes.Add(-int64(len(key) + len(previous.value)))
 	}
 }
 
