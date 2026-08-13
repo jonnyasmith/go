@@ -130,6 +130,34 @@ func (store *Store) writeSnapshot() error {
 	return nil
 }
 
+func (store *Store) writeFinalSnapshot() error {
+	if store.stats.evictions.Load() == 0 {
+		return store.writeSnapshot()
+	}
+
+	recovered := &Store{
+		dir:       store.dir,
+		logger:    store.logger,
+		shards:    make([]shard, len(store.shards)),
+		shardMask: store.shardMask,
+	}
+	for index := range recovered.shards {
+		recovered.shards[index].entries = make(map[string]*entry)
+	}
+	log, err := recoverLog(context.Background(), recovered)
+	if err != nil {
+		return fmt.Errorf("cache: prepare final snapshot: %w", err)
+	}
+	if err := log.file.Close(); err != nil {
+		return fmt.Errorf("cache: close final snapshot recovery log %q: %w", log.file.Name(), err)
+	}
+	if err := recovered.writeSnapshot(); err != nil {
+		return err
+	}
+	store.stats.snapshots.Add(1)
+	return nil
+}
+
 func encodeSnapshotEntry(current *entry) []byte {
 	length := snapshotRecordFixedSize + len(current.key) + len(current.value)
 	record := make([]byte, length)

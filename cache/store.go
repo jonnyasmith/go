@@ -78,13 +78,14 @@ type Store struct {
 	bytes     atomic.Int64
 	stats     counters
 
-	stateMu   sync.RWMutex
-	closed    bool
-	requests  chan *writeRequest
-	done      chan struct{}
-	sweepStop chan struct{}
-	sweepDone chan struct{}
-
+	stateMu         sync.RWMutex
+	closed          bool
+	requests        chan *writeRequest
+	done            chan struct{}
+	flushStop       chan struct{}
+	flushDone       chan struct{}
+	sweepStop       chan struct{}
+	sweepDone       chan struct{}
 	logSequence     atomic.Uint64
 	snapshotRunning atomic.Bool
 	snapshotWG      sync.WaitGroup
@@ -136,6 +137,8 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 		shardMask: uint64(options.shards - 1),
 		requests:  make(chan *writeRequest, 1024),
 		done:      make(chan struct{}),
+		flushStop: make(chan struct{}),
+		flushDone: make(chan struct{}),
 		sweepStop: make(chan struct{}),
 		sweepDone: make(chan struct{}),
 		lockFile:  lockFile,
@@ -244,10 +247,11 @@ func (store *Store) Close() error {
 		return nil
 	}
 	store.closed = true
+	close(store.flushStop)
 	close(store.sweepStop)
 	store.stateMu.Unlock()
+	<-store.flushDone
 	<-store.sweepDone
-
 	request := &writeRequest{kind: requestClose, result: make(chan error, 1)}
 	store.requests <- request
 	writerErr := <-request.result

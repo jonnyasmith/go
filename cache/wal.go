@@ -58,11 +58,22 @@ type logState struct {
 func (store *Store) runWriter(log *logState, options options) {
 	defer close(store.done)
 	ticker := time.NewTicker(options.flushInterval)
-	defer ticker.Stop()
-	defer func() { _ = log.file.Close() }()
-
+	flushStop := store.flushStop
+	flushStopped := false
+	defer func() {
+		if !flushStopped {
+			ticker.Stop()
+			close(store.flushDone)
+		}
+		_ = log.file.Close()
+	}()
 	for {
 		select {
+		case <-flushStop:
+			ticker.Stop()
+			close(store.flushDone)
+			flushStop = nil
+			flushStopped = true
 		case <-ticker.C:
 			if store.stats.lastError.Load() == nil {
 				if err := log.file.Sync(); err != nil {
@@ -128,11 +139,9 @@ func (store *Store) handleControl(log *logState, request *writeRequest) bool {
 	}
 	if request.kind == requestClose {
 		store.snapshotWG.Wait()
-		if store.stats.evictions.Load() == 0 {
-			if snapshotErr := store.writeSnapshot(); snapshotErr != nil {
-				store.stats.lastSnapshotError.Store(&errorState{err: snapshotErr})
-				err = errors.Join(err, snapshotErr)
-			}
+		if snapshotErr := store.writeFinalSnapshot(); snapshotErr != nil {
+			store.stats.lastSnapshotError.Store(&errorState{err: snapshotErr})
+			err = errors.Join(err, snapshotErr)
 		}
 		err = errors.Join(err, log.file.Close())
 	}

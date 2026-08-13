@@ -97,7 +97,9 @@ The byte-level layout is specified in [docs/on-disk-format.md](docs/on-disk-form
 
 ## Command
 
-`cmd/cached load -dir DIRECTORY` drives concurrent-safe durable writes until it is interrupted or killed. It is used by the crash-injection test. The terminal REPL and configurable read/write mix are planned.
+`cmd/cached repl -dir DIRECTORY` opens a terminal REPL. Commands are `set KEY VALUE [TTL]`, `get KEY`, `delete KEY`, `stats`, `sync`, and `quit`; TTLs use Go duration syntax such as `30s` or `5m`.
+
+`cmd/cached load -dir DIRECTORY -read-percent 90 -workers 8` drives a configurable concurrent read/write mix until interrupted. `-keyspace`, `-capacity`, `-shards`, `-snapshot-threshold`, `-value-bytes`, and `-ttl` make expiry, eviction, snapshot installation, and shutdown observable under load. Interrupt and termination signals stop the workload, run the store's full close sequence, and report whether closure succeeded. The command opens no listener and implements no wire protocol.
 
 ## Dependencies
 
@@ -116,8 +118,7 @@ go test -race ./...
 
 ## Status
 
-The durable store, lifetime and capacity management, segmented log, and snapshots are implemented. The terminal REPL and configurable load mixes remain planned:
-
+The durable store, lifetime and capacity management, segmented log, snapshots, graceful shutdown, terminal REPL, load generator, crash suite, and contention benchmarks are implemented:
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them
 - [`docs/on-disk-format.md`](docs/on-disk-format.md) — the byte-level contract
