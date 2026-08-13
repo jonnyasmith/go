@@ -148,6 +148,13 @@ func TestCapacityEvictsShardLRUAndRecoveryReplaysIt(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
+	snapshots, err := filepath.Glob(filepath.Join(dir, "*.snap"))
+	if err != nil {
+		t.Fatalf("list snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshot count after eviction = %d; want 1", len(snapshots))
+	}
 
 	store, err = cache.Open(context.Background(), dir, cache.WithShards(1), cache.WithCapacity(3*smallEntryBytes))
 	if err != nil {

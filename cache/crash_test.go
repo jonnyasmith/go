@@ -14,6 +14,47 @@ import (
 )
 
 func TestKilledLoadProcessRecoversEveryAcknowledgedWrite(t *testing.T) {
+	dir, acknowledged := killLoad(t, nil, func(_ string, count int) bool { return count >= 100 })
+	assertAcknowledgedPresent(t, dir, acknowledged, 0)
+}
+
+func TestKilledLoadProcessRecoversEntriesWithTTLs(t *testing.T) {
+	dir, acknowledged := killLoad(t, []string{"-ttl", "1h"}, func(_ string, count int) bool { return count >= 100 })
+	assertAcknowledgedPresent(t, dir, acknowledged, 0)
+}
+
+func TestKilledLoadProcessRecoversUnderCapacityPressure(t *testing.T) {
+	const capacity = uint64(4096)
+	dir, _ := killLoad(t, []string{"-capacity", "4096", "-shards", "1"}, func(_ string, count int) bool { return count >= 100 })
+	store, err := cache.Open(context.Background(), dir, cache.WithCapacity(capacity), cache.WithShards(1))
+	if err != nil {
+		t.Fatalf("reopen after capacity-pressure kill: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Len() == 0 || store.Bytes() > capacity {
+		t.Fatalf("recovered bounded store = %d entries, %d bytes", store.Len(), store.Bytes())
+	}
+	if store.Stats().Evictions == 0 {
+		t.Fatal("recovery under capacity pressure reported no evictions")
+	}
+}
+
+func TestKilledDuringSnapshotInstallRecoversAcknowledgedWrites(t *testing.T) {
+	dir, acknowledged := killLoad(t,
+		[]string{"-snapshot-threshold", "16777216", "-value-bytes", "262144"},
+		func(dir string, count int) bool {
+			if count < 64 {
+				return false
+			}
+			temporary, _ := filepath.Glob(filepath.Join(dir, ".snapshot-*"))
+			return len(temporary) != 0
+		},
+	)
+	assertAcknowledgedPresent(t, dir, acknowledged, 262144)
+}
+
+func killLoad(t *testing.T, extraArgs []string, ready func(dir string, acknowledged int) bool) (string, []string) {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), "cached")
 	build := exec.Command("go", "build", "-o", binary, "./cmd/cached")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -21,7 +62,8 @@ func TestKilledLoadProcessRecoversEveryAcknowledgedWrite(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	command := exec.Command(binary, "load", "-dir", dir)
+	args := append([]string{"load", "-dir", dir}, extraArgs...)
+	command := exec.Command(binary, args...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
@@ -34,31 +76,36 @@ func TestKilledLoadProcessRecoversEveryAcknowledgedWrite(t *testing.T) {
 
 	var mu sync.Mutex
 	acknowledged := make([]string, 0, 128)
-	reached := make(chan struct{})
 	scanned := make(chan error, 1)
 	go func() {
 		scanner := bufio.NewScanner(stdout)
-		notified := false
 		for scanner.Scan() {
 			mu.Lock()
 			acknowledged = append(acknowledged, scanner.Text())
-			count := len(acknowledged)
 			mu.Unlock()
-			if count >= 100 && !notified {
-				close(reached)
-				notified = true
-			}
 		}
 		scanned <- scanner.Err()
 	}()
 
-	select {
-	case <-reached:
-	case <-time.After(10 * time.Second):
-		_ = command.Process.Kill()
-		_ = command.Wait()
-		t.Fatalf("load process did not acknowledge writes: %s", stderr.String())
+	deadline := time.NewTimer(15 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	readyToKill := false
+	for !readyToKill {
+		select {
+		case <-ticker.C:
+			mu.Lock()
+			count := len(acknowledged)
+			mu.Unlock()
+			readyToKill = ready(dir, count)
+		case <-deadline.C:
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			t.Fatalf("load process did not reach crash point: %s", stderr.String())
+		}
 	}
+
 	if err := command.Process.Kill(); err != nil {
 		t.Fatalf("kill cached: %v", err)
 	}
@@ -68,18 +115,28 @@ func TestKilledLoadProcessRecoversEveryAcknowledgedWrite(t *testing.T) {
 	if err := <-scanned; err != nil {
 		t.Fatalf("scan acknowledgements: %v", err)
 	}
+	mu.Lock()
+	result := append([]string(nil), acknowledged...)
+	mu.Unlock()
+	return dir, result
+}
 
+func assertAcknowledgedPresent(t *testing.T, dir string, acknowledged []string, valueBytes int) {
+	t.Helper()
 	store, err := cache.Open(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("reopen after kill: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	mu.Lock()
-	defer mu.Unlock()
 	for _, key := range acknowledged {
+		want := []byte(key)
+		if valueBytes != 0 {
+			want = make([]byte, valueBytes)
+			copy(want, key)
+		}
 		value, ok := store.Get(key)
-		if !ok || string(value) != key {
-			t.Fatalf("acknowledged key %q recovered as %q, %v", key, value, ok)
+		if !ok || !bytes.Equal(value, want) {
+			t.Fatalf("acknowledged key %q recovered as %d bytes, present %v", key, len(value), ok)
 		}
 	}
 }

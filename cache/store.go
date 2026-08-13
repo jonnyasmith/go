@@ -82,6 +82,8 @@ type Store struct {
 	closed    bool
 	requests  chan *writeRequest
 	done      chan struct{}
+	flushStop chan struct{}
+	flushDone chan struct{}
 	sweepStop chan struct{}
 	sweepDone chan struct{}
 
@@ -90,6 +92,27 @@ type Store struct {
 	snapshotWG      sync.WaitGroup
 
 	lockFile *os.File
+}
+
+func newStoreState(dir string, logger *slog.Logger, shardCount int, shardCapacity uint64, lockFile *os.File) *Store {
+	store := &Store{
+		dir:       dir,
+		logger:    logger,
+		shards:    make([]shard, shardCount),
+		shardMask: uint64(shardCount - 1),
+		requests:  make(chan *writeRequest, 1024),
+		done:      make(chan struct{}),
+		flushStop: make(chan struct{}),
+		flushDone: make(chan struct{}),
+		sweepStop: make(chan struct{}),
+		sweepDone: make(chan struct{}),
+		lockFile:  lockFile,
+	}
+	for index := range store.shards {
+		store.shards[index].entries = make(map[string]*entry)
+		store.shards[index].capacity = shardCapacity
+	}
+	return store
 }
 
 // Open takes exclusive ownership of dir and recovers its write-ahead log.
@@ -129,21 +152,7 @@ func Open(ctx context.Context, dir string, supplied ...Option) (*Store, error) {
 	}
 
 	shardCapacity := options.capacity / uint64(options.shards)
-	store := &Store{
-		dir:       dir,
-		logger:    options.logger,
-		shards:    make([]shard, options.shards),
-		shardMask: uint64(options.shards - 1),
-		requests:  make(chan *writeRequest, 1024),
-		done:      make(chan struct{}),
-		sweepStop: make(chan struct{}),
-		sweepDone: make(chan struct{}),
-		lockFile:  lockFile,
-	}
-	for index := range store.shards {
-		store.shards[index].entries = make(map[string]*entry)
-		store.shards[index].capacity = shardCapacity
-	}
+	store := newStoreState(dir, options.logger, options.shards, shardCapacity, lockFile)
 
 	log, err := recoverLog(ctx, store)
 	if err != nil {
@@ -244,10 +253,11 @@ func (store *Store) Close() error {
 		return nil
 	}
 	store.closed = true
+	close(store.flushStop)
 	close(store.sweepStop)
 	store.stateMu.Unlock()
+	<-store.flushDone
 	<-store.sweepDone
-
 	request := &writeRequest{kind: requestClose, result: make(chan error, 1)}
 	store.requests <- request
 	writerErr := <-request.result

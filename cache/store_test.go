@@ -3,7 +3,9 @@ package cache_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +72,68 @@ func TestStorePersistsCopiedValues(t *testing.T) {
 	}
 	if _, ok := store.Get("key"); ok {
 		t.Fatal("deleted key is present")
+	}
+}
+
+func TestClosePersistsEveryConcurrentWriteItAccepts(t *testing.T) {
+	dir := t.TempDir()
+	store, err := cache.Open(context.Background(), dir, cache.WithFlushInterval(time.Hour))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	type result struct {
+		key string
+		err error
+	}
+	const writers = 256
+	start := make(chan struct{})
+	results := make(chan result, writers)
+	var group sync.WaitGroup
+	for index := range writers {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			<-start
+			key := fmt.Sprintf("key-%03d", index)
+			results <- result{key: key, err: store.Set(key, []byte(key))}
+		}(index)
+	}
+	close(start)
+	first := <-results
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- store.Close() }()
+	group.Wait()
+	close(results)
+	if err := <-closeResult; err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	accepted := make([]string, 0, writers)
+	if first.err != nil {
+		t.Fatalf("first set before close: %v", first.err)
+	}
+	accepted = append(accepted, first.key)
+	for result := range results {
+		switch {
+		case result.err == nil:
+			accepted = append(accepted, result.key)
+		case errors.Is(result.err, cache.ErrClosed):
+		default:
+			t.Fatalf("set %q during close: %v", result.key, result.err)
+		}
+	}
+
+	reopened, err := cache.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	for _, key := range accepted {
+		value, ok := reopened.Get(key)
+		if !ok || string(value) != key {
+			t.Fatalf("accepted key %q recovered as %q, %v", key, value, ok)
+		}
 	}
 }
 

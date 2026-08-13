@@ -2,7 +2,7 @@
 
 An embeddable key-value store for Go. The durable in-memory store survives process restart, expires stale entries, and stays within a configured memory capacity.
 
-> **Status:** `Open`, map operations, TTL expiry, capacity eviction, bounded sweeping, segmented write-ahead log recovery, snapshots, synchronization, statistics, and the load-mode command are implemented.
+> **Status:** The exported store API, graceful shutdown, terminal REPL, configurable load generator, crash suite, and contention benchmarks are implemented.
 
 ```go
 c, err := cache.Open(ctx, "/var/lib/myapp/cache",
@@ -81,7 +81,7 @@ Options are passed to `Open` and validated there; an invalid value fails immedia
 
 Capacity is divided evenly across shards and must provide at least the fixed 64-byte overhead per shard. Each entry is charged for its key, value, and that overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats samples while at least one quarter are reclaimed, and spends at most one millisecond in a shard per visit.
 
-Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear if the store later reopens with a larger capacity.
+Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Automatic snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear. Clean shutdown reconstructs the durable image from that retained history before installing its mandatory final snapshot, so an evicted live entry still reappears when the store is reopened with a larger capacity.
 
 ## Observability
 
@@ -97,7 +97,9 @@ The byte-level layout is specified in [docs/on-disk-format.md](docs/on-disk-form
 
 ## Command
 
-`cmd/cached load -dir DIRECTORY` drives concurrent-safe durable writes until it is interrupted or killed. It is used by the crash-injection test. The terminal REPL and configurable read/write mix are planned.
+`cmd/cached repl -dir DIRECTORY` opens a terminal REPL. Commands are `set KEY VALUE [TTL]`, `get KEY`, `delete KEY`, `stats`, `sync`, and `quit`; TTLs use Go duration syntax such as `30s` or `5m`.
+
+`cmd/cached load -dir DIRECTORY -read-percent 90 -workers 8` drives a configurable concurrent read/write mix until interrupted. `-keyspace`, `-capacity`, `-shards`, `-snapshot-threshold`, `-value-bytes`, and `-ttl` make expiry, eviction, snapshot installation, and shutdown observable under load. Interrupt and termination signals stop the workload, run the store's full close sequence, and report whether closure succeeded. The command opens no listener and implements no wire protocol.
 
 ## Dependencies
 
@@ -116,7 +118,7 @@ go test -race ./...
 
 ## Status
 
-The durable store, lifetime and capacity management, segmented log, and snapshots are implemented. The terminal REPL and configurable load mixes remain planned:
+The durable store, lifetime and capacity management, segmented log, snapshots, graceful shutdown, terminal REPL, load generator, crash suite, and contention benchmarks are implemented:
 
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them
