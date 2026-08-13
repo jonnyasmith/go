@@ -23,8 +23,7 @@ coverage.*
 profile.cov
 *.prof
 
-# Go workspace (this repo is not a workspace yet)
-go.work
+# Go workspace checksum
 go.work.sum
 
 # Env and secrets
