@@ -6,5 +6,5 @@ Go cannot fork, so there is no cheap copy-on-write image of the store, and takin
 
 - The snapshot is not a single point in time; shards in it are internally consistent but mutually skewed.
 - Recovery corrects for this by replaying the log from the **lowest** sequence in the header. Records for shards already past that point are re-applied harmlessly, because applying a record is idempotent per key.
-- A snapshot is written to a temporary file, fsynced, and installed by rename, so a partial snapshot is never visible to recovery.
-- Because the header holds one sequence per shard, it also fixes the shard count. A store reopened with a different shard count discards the snapshot and replays from the oldest retained segment rather than failing: retuning sharding is a legitimate operational change, and the only cost is a slower recovery.
+- A snapshot attempt records the eviction generation before serialization and validates it under the eviction-path interlock before installation. If a live-entry eviction overlaps serialization, the attempt is discarded before rename and log pruning; serialization itself still takes only per-shard read locks.
+- Because the header holds one sequence per shard, it also records the original shard count. A store reopened with a different shard count keeps the snapshot as its base image but cannot map the old per-shard replay positions onto the new shards. It safely skips only through the lowest header sequence, then replays every retained record after that point.

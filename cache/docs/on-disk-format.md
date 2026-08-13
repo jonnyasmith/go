@@ -7,16 +7,22 @@ All integers are little-endian.
 ## Directory
 
 ```
-<dir>/LOCK               exclusive OS file lock, held for the lifetime of an open store
-<dir>/NNNNNNNN.seg       log segment, named for the sequence of its first record
-<dir>/NNNNNNNN.snap      snapshot, named for the lowest sequence it covers
+<dir>/LOCK                           exclusive OS file lock, held for the lifetime of an open store
+<dir>/NNNNNNNNNNNNNNNNNNNN.seg       log segment, named for the sequence of its first record
+<dir>/NNNNNNNNNNNNNNNNNNNN.snap      snapshot, named for the lowest sequence it covers
 ```
 
-Segment and snapshot names are zero-padded to 8 digits so lexical order is sequence order. At most one snapshot is retained; segments below its lowest covered sequence are deleted after it is installed.
+New segment and snapshot names encode the sequence as zero-padded, fixed-width 20-digit decimal. This represents the complete `uint64` range and makes lexical order equal sequence order.
+
+Eight-digit names written by earlier binaries remain valid when their stem represents the same decimal sequence. Recovery may contain both legacy eight-digit and current 20-digit names and orders them by the parsed numeric sequence; two names with different widths that identify the same sequence are rejected as ambiguous. Existing files are not renamed in place. Every newly installed segment or snapshot uses the 20-digit form, so stores migrate naturally as files are rolled and superseded.
+
+At most one snapshot is retained; segments below its lowest covered sequence are deleted after it is installed.
 
 ## Segment
 
 A segment begins with a header and holds records until it exceeds the segment size, at which point the next record starts a new segment.
+
+A new segment is created under a temporary name. Its header is written and fsynced, the file is renamed to its sequence name, and the store directory is fsynced before any record is written to the segment. A failure in any installation step is a fatal write-ahead-log failure.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -61,14 +67,14 @@ Entries follow, grouped by shard:
 | key | `keyLen` bytes | |
 | value | remainder | length derived from `length` |
 
-The snapshot is written to a temporary file, fsynced, and installed by rename.
+The snapshot is written to a temporary file and fsynced. Serialization records the eviction generation before reading shards. Installation takes the eviction-path interlock and validates that generation before rename; an attempt overlapping a live-entry eviction is discarded without installing the snapshot or pruning segments. A successful rename is followed by a directory fsync.
 
 ## Recovery
 
 1. Take the lock.
-2. Read the newest snapshot. If its shard count differs from the configured one, discard it.
-3. Load its entries, then replay segments from the lowest sequence in its header — or from the oldest retained segment if there is no usable snapshot.
-4. Skip records already applied; applying a record is idempotent per key.
+2. Read the newest snapshot as a base image. If its shard count matches the configured count, retain its per-shard sequences for replay skipping. If the count differs, keep the loaded entries as the base image but disable per-shard skipping.
+3. Validate retained history. Without a snapshot, the oldest retained record must be sequence 1. With a snapshot, retained history must begin no later than one past the lowest per-shard sequence and continue through the highest per-shard sequence. No WAL is required only when every per-shard sequence is equal.
+4. Replay segments. Matching shard counts skip records represented by each shard. Changed shard counts skip only the prefix through the lowest sequence, which every snapshot shard safely represents, then replay all retained records.
 5. Drop entries whose deadline has passed, then evict down to the configured capacity.
 
 ### Failure tiers

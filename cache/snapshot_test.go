@@ -82,7 +82,7 @@ func TestCloseInstallsFinalSnapshot(t *testing.T) {
 	}
 }
 
-func TestSnapshotWithDifferentShardCountIsDiscarded(t *testing.T) {
+func TestSnapshotWithDifferentShardCountRemainsRecoveryBase(t *testing.T) {
 	dir := t.TempDir()
 	store, err := cache.Open(context.Background(), dir,
 		cache.WithShards(2),

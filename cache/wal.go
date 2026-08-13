@@ -148,6 +148,11 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 	}
 
 	for first := 0; first < len(requests); {
+		if log.seq == ^uint64(0) {
+			failure := store.latch(fmt.Errorf("cache: WAL sequence space exhausted"))
+			respondAll(requests[first:], failure)
+			return
+		}
 		nextRecord := encodeRecord(log.seq+1, requests[first])
 		if log.offset > segmentHeaderSize && log.offset+int64(len(nextRecord)) > segmentSize {
 			if err := store.rollSegment(log, log.seq+1); err != nil {
@@ -160,6 +165,9 @@ func (store *Store) writeBatch(log *logState, segmentSize int64, requests []*wri
 		payload := make([]byte, 0, len(nextRecord)*(len(requests)-first))
 		last := first
 		for last < len(requests) {
+			if uint64(last-first) >= ^uint64(0)-log.seq {
+				break
+			}
 			record := encodeRecord(log.seq+uint64(last-first)+1, requests[last])
 			if last > first && log.offset+int64(len(payload)) > segmentSize {
 				break
@@ -204,7 +212,7 @@ func (store *Store) rollSegment(log *logState, firstSequence uint64) error {
 	if err := log.file.Close(); err != nil {
 		return fmt.Errorf("cache: close segment %q: %w", log.file.Name(), err)
 	}
-	file, err := createSegment(store.dir, firstSequence)
+	file, err := store.createSegment(firstSequence)
 	if err != nil {
 		return err
 	}
@@ -237,9 +245,9 @@ func encodeRecord(sequence uint64, request *writeRequest) []byte {
 	return record
 }
 
-func createSegment(dir string, firstSequence uint64) (*os.File, error) {
-	path := filepath.Join(dir, segmentName(firstSequence))
-	file, err := os.CreateTemp(dir, ".segment-*")
+func (store *Store) createSegment(firstSequence uint64) (*os.File, error) {
+	path := filepath.Join(store.dir, segmentName(firstSequence))
+	file, err := os.CreateTemp(store.dir, ".segment-*")
 	if err != nil {
 		return nil, fmt.Errorf("cache: create segment temporary file for %q: %w", path, err)
 	}
@@ -270,9 +278,13 @@ func createSegment(dir string, firstSequence uint64) (*os.File, error) {
 		return nil, fmt.Errorf("cache: install segment %q: %w", path, err)
 	}
 	removeTemporary = false
+	if err := store.directorySync(store.dir); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("cache: commit segment installation %q: %w", path, err)
+	}
 	return file, nil
 }
 
 func segmentName(firstSequence uint64) string {
-	return fmt.Sprintf("%08d.seg", firstSequence)
+	return fmt.Sprintf("%020d.seg", firstSequence)
 }

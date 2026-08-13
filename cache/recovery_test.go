@@ -76,7 +76,7 @@ func TestEveryTruncationWithinFinalRecordIsATornTail(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	segment, err := os.ReadFile(filepath.Join(base, "00000001.seg"))
+	segment, err := os.ReadFile(filepath.Join(base, "00000000000000000001.seg"))
 	if err != nil {
 		t.Fatalf("read segment: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestInteriorChecksumFailureRefusesRecovery(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	path := filepath.Join(dir, "00000001.seg")
+	path := filepath.Join(dir, "00000000000000000001.seg")
 	segment, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read segment: %v", err)
@@ -187,7 +187,7 @@ func TestSegmentRolloverPreservesSequenceForRecovery(t *testing.T) {
 		}
 	}
 
-	for _, name := range []string{"00000001.seg", "00000002.seg", "00000003.seg"} {
+	for _, name := range []string{"00000000000000000001.seg", "00000000000000000002.seg", "00000000000000000003.seg"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("stat %s: %v", name, err)
 		}

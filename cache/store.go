@@ -87,26 +87,30 @@ type Store struct {
 	sweepStop chan struct{}
 	sweepDone chan struct{}
 
-	logSequence     atomic.Uint64
-	snapshotRunning atomic.Bool
-	snapshotWG      sync.WaitGroup
+	logSequence      atomic.Uint64
+	snapshotRunning  atomic.Bool
+	snapshotWG       sync.WaitGroup
+	snapshotInstall  sync.Mutex
+	evictionSequence uint64
 
-	lockFile *os.File
+	directorySync func(string) error
+	lockFile      *os.File
 }
 
 func newStoreState(dir string, logger *slog.Logger, shardCount int, shardCapacity uint64, lockFile *os.File) *Store {
 	store := &Store{
-		dir:       dir,
-		logger:    logger,
-		shards:    make([]shard, shardCount),
-		shardMask: uint64(shardCount - 1),
-		requests:  make(chan *writeRequest, 1024),
-		done:      make(chan struct{}),
-		flushStop: make(chan struct{}),
-		flushDone: make(chan struct{}),
-		sweepStop: make(chan struct{}),
-		sweepDone: make(chan struct{}),
-		lockFile:  lockFile,
+		dir:           dir,
+		logger:        logger,
+		shards:        make([]shard, shardCount),
+		shardMask:     uint64(shardCount - 1),
+		requests:      make(chan *writeRequest, 1024),
+		done:          make(chan struct{}),
+		flushStop:     make(chan struct{}),
+		flushDone:     make(chan struct{}),
+		sweepStop:     make(chan struct{}),
+		sweepDone:     make(chan struct{}),
+		directorySync: syncDirectory,
+		lockFile:      lockFile,
 	}
 	for index := range store.shards {
 		store.shards[index].entries = make(map[string]*entry)

@@ -51,7 +51,7 @@ func TestSequenceGapRefusesOpenAtRecordOffset(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	path := filepath.Join(dir, "00000001.seg")
+	path := filepath.Join(dir, "00000000000000000001.seg")
 	segment, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read segment: %v", err)
