@@ -59,21 +59,13 @@ func (store *Store) runWriter(log *logState, options options) {
 	defer close(store.done)
 	ticker := time.NewTicker(options.flushInterval)
 	flushStop := store.flushStop
-	flushStopped := false
-	defer func() {
-		if !flushStopped {
-			ticker.Stop()
-			close(store.flushDone)
-		}
-		_ = log.file.Close()
-	}()
+	defer func() { _ = log.file.Close() }()
 	for {
 		select {
 		case <-flushStop:
 			ticker.Stop()
 			close(store.flushDone)
 			flushStop = nil
-			flushStopped = true
 		case <-ticker.C:
 			if store.stats.lastError.Load() == nil {
 				if err := log.file.Sync(); err != nil {

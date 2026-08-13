@@ -15,12 +15,12 @@ import (
 
 func TestKilledLoadProcessRecoversEveryAcknowledgedWrite(t *testing.T) {
 	dir, acknowledged := killLoad(t, nil, func(_ string, count int) bool { return count >= 100 })
-	assertAcknowledgedPresent(t, dir, acknowledged)
+	assertAcknowledgedPresent(t, dir, acknowledged, 0)
 }
 
 func TestKilledLoadProcessRecoversEntriesWithTTLs(t *testing.T) {
 	dir, acknowledged := killLoad(t, []string{"-ttl", "1h"}, func(_ string, count int) bool { return count >= 100 })
-	assertAcknowledgedPresent(t, dir, acknowledged)
+	assertAcknowledgedPresent(t, dir, acknowledged, 0)
 }
 
 func TestKilledLoadProcessRecoversUnderCapacityPressure(t *testing.T) {
@@ -50,7 +50,7 @@ func TestKilledDuringSnapshotInstallRecoversAcknowledgedWrites(t *testing.T) {
 			return len(temporary) != 0
 		},
 	)
-	assertAcknowledgedPresent(t, dir, acknowledged)
+	assertAcknowledgedPresent(t, dir, acknowledged, 262144)
 }
 
 func killLoad(t *testing.T, extraArgs []string, ready func(dir string, acknowledged int) bool) (string, []string) {
@@ -88,18 +88,17 @@ func killLoad(t *testing.T, extraArgs []string, ready func(dir string, acknowled
 	}()
 
 	deadline := time.NewTimer(15 * time.Second)
-	ticker := time.NewTicker(100 * time.Microsecond)
+	ticker := time.NewTicker(time.Millisecond)
 	defer deadline.Stop()
 	defer ticker.Stop()
-	for {
+	readyToKill := false
+	for !readyToKill {
 		select {
 		case <-ticker.C:
 			mu.Lock()
 			count := len(acknowledged)
 			mu.Unlock()
-			if ready(dir, count) {
-				goto kill
-			}
+			readyToKill = ready(dir, count)
 		case <-deadline.C:
 			_ = command.Process.Kill()
 			_ = command.Wait()
@@ -107,7 +106,6 @@ func killLoad(t *testing.T, extraArgs []string, ready func(dir string, acknowled
 		}
 	}
 
-kill:
 	if err := command.Process.Kill(); err != nil {
 		t.Fatalf("kill cached: %v", err)
 	}
@@ -123,7 +121,7 @@ kill:
 	return dir, result
 }
 
-func assertAcknowledgedPresent(t *testing.T, dir string, acknowledged []string) {
+func assertAcknowledgedPresent(t *testing.T, dir string, acknowledged []string, valueBytes int) {
 	t.Helper()
 	store, err := cache.Open(context.Background(), dir)
 	if err != nil {
@@ -131,8 +129,14 @@ func assertAcknowledgedPresent(t *testing.T, dir string, acknowledged []string) 
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	for _, key := range acknowledged {
-		if _, ok := store.Get(key); !ok {
-			t.Fatalf("acknowledged key %q was not recovered", key)
+		want := []byte(key)
+		if valueBytes != 0 {
+			want = make([]byte, valueBytes)
+			copy(want, key)
+		}
+		value, ok := store.Get(key)
+		if !ok || !bytes.Equal(value, want) {
+			t.Fatalf("acknowledged key %q recovered as %d bytes, present %v", key, len(value), ok)
 		}
 	}
 }

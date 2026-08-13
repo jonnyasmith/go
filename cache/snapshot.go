@@ -135,15 +135,7 @@ func (store *Store) writeFinalSnapshot() error {
 		return store.writeSnapshot()
 	}
 
-	recovered := &Store{
-		dir:       store.dir,
-		logger:    store.logger,
-		shards:    make([]shard, len(store.shards)),
-		shardMask: store.shardMask,
-	}
-	for index := range recovered.shards {
-		recovered.shards[index].entries = make(map[string]*entry)
-	}
+	recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
 	log, err := recoverLog(context.Background(), recovered)
 	if err != nil {
 		return fmt.Errorf("cache: prepare final snapshot: %w", err)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"testing"
@@ -53,6 +54,18 @@ func TestREPLDrivesStoreCommands(t *testing.T) {
 	}
 	if _, ok := store.Get("plain"); ok {
 		t.Fatal("deleted value reappeared after repl close")
+	}
+}
+
+func TestLoadReadOnlyMixPerformsReads(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	if err := runLoad(ctx, []string{"-dir", t.TempDir(), "-read-percent", "100", "-workers", "2", "-keyspace", "32"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run read-only load: %v\n%s", err, stderr.String())
+	}
+	if !regexp.MustCompile(`reads=[1-9][0-9]* writes=0`).MatchString(stderr.String()) {
+		t.Fatalf("read-only load report = %q; want reads and no writes", stderr.String())
 	}
 }
 

@@ -110,30 +110,29 @@ func runREPL(ctx context.Context, args []string, input io.Reader, output, diagno
 		scanResult <- scanner.Err()
 	}()
 
-	var runErr error
-	for runErr == nil {
+	runErr := serveREPL(ctx, store, lines, scanResult, output, diagnostics)
+	return errors.Join(runErr, closeStore(store, diagnostics))
+}
+
+func serveREPL(ctx context.Context, store *cache.Store, lines <-chan string, scanResult <-chan error, output, diagnostics io.Writer) error {
+	for {
 		select {
 		case <-ctx.Done():
-			runErr = nil
-			goto close
+			return nil
 		case err := <-scanResult:
-			runErr = err
-			goto close
+			return err
 		case line := <-lines:
 			stop, err := executeREPL(store, line, output)
 			if err != nil {
 				if _, writeErr := fmt.Fprintf(diagnostics, "error: %v\n", err); writeErr != nil {
-					runErr = writeErr
+					return writeErr
 				}
 			}
 			if stop {
-				goto close
+				return nil
 			}
 		}
 	}
-
-close:
-	return errors.Join(runErr, closeStore(store, diagnostics))
 }
 
 func executeREPL(store *cache.Store, line string, output io.Writer) (bool, error) {
@@ -218,11 +217,11 @@ type loadFlags struct {
 func runLoad(ctx context.Context, args []string, output, diagnostics io.Writer) error {
 	flags := flag.NewFlagSet("load", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
-	config := &loadFlags{readPercent: 0, workers: 1, keyspace: 10000}
+	config := &loadFlags{}
 	config.store = addStoreFlags(flags)
-	flags.IntVar(&config.readPercent, "read-percent", config.readPercent, "percentage of operations that are reads")
-	flags.IntVar(&config.workers, "workers", config.workers, "concurrent workers")
-	flags.Uint64Var(&config.keyspace, "keyspace", config.keyspace, "number of keys read repeatedly")
+	flags.IntVar(&config.readPercent, "read-percent", 0, "percentage of operations that are reads")
+	flags.IntVar(&config.workers, "workers", 1, "concurrent workers")
+	flags.Uint64Var(&config.keyspace, "keyspace", 10000, "number of keys used by the workload")
 	flags.IntVar(&config.valueBytes, "value-bytes", 0, "fixed value size (zero uses the key)")
 	flags.DurationVar(&config.ttl, "ttl", 0, "TTL for writes (zero disables TTL)")
 	if err := flags.Parse(args); err != nil {
@@ -261,16 +260,12 @@ func runLoad(ctx context.Context, args []string, output, diagnostics io.Writer) 
 			random := rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), uint64(worker+1)))
 			for workCtx.Err() == nil {
 				if random.IntN(100) < config.readPercent {
-					upper := sequence.Load()
-					if upper == 0 {
-						continue
-					}
-					key := loadKey(random.Uint64N(min(upper, config.keyspace)) + 1)
+					key := loadKey(random.Uint64N(config.keyspace) + 1)
 					store.Get(key)
 					continue
 				}
 				next := sequence.Add(1)
-				key := loadKey(next)
+				key := loadKey((next-1)%config.keyspace + 1)
 				value := []byte(key)
 				if config.valueBytes != 0 {
 					value = make([]byte, config.valueBytes)
@@ -303,7 +298,10 @@ func runLoad(ctx context.Context, args []string, output, diagnostics io.Writer) 
 	}
 	cancel()
 	workers.Wait()
-	return errors.Join(err, closeStore(store, diagnostics))
+	stats := store.Stats()
+	_, reportErr := fmt.Fprintf(diagnostics, "cached load: reads=%d writes=%d hits=%d misses=%d\n",
+		stats.Hits+stats.Misses, stats.RecordsWritten, stats.Hits, stats.Misses)
+	return errors.Join(err, reportErr, closeStore(store, diagnostics))
 }
 
 func reportLoadFailure(failures chan<- error, cancel context.CancelFunc, err error) {
@@ -315,5 +313,5 @@ func reportLoadFailure(failures chan<- error, cancel context.CancelFunc, err err
 }
 
 func loadKey(sequence uint64) string {
-	return "key-" + fmt.Sprintf("%020d", sequence)
+	return fmt.Sprintf("key-%020d", sequence)
 }

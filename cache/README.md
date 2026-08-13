@@ -2,7 +2,7 @@
 
 An embeddable key-value store for Go. The durable in-memory store survives process restart, expires stale entries, and stays within a configured memory capacity.
 
-> **Status:** `Open`, map operations, TTL expiry, capacity eviction, bounded sweeping, segmented write-ahead log recovery, snapshots, synchronization, statistics, and the load-mode command are implemented.
+> **Status:** The exported store API, graceful shutdown, terminal REPL, configurable load generator, crash suite, and contention benchmarks are implemented.
 
 ```go
 c, err := cache.Open(ctx, "/var/lib/myapp/cache",
@@ -81,7 +81,7 @@ Options are passed to `Open` and validated there; an invalid value fails immedia
 
 Capacity is divided evenly across shards and must provide at least the fixed 64-byte overhead per shard. Each entry is charged for its key, value, and that overhead. The sweep visits shards at staggered offsets, samples entries within each shard, repeats samples while at least one quarter are reclaimed, and spends at most one millisecond in a shard per visit.
 
-Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear if the store later reopens with a larger capacity.
+Capacity and shard count may be changed between runs. A snapshot written with another shard count is ignored and recovery falls back to the oldest retained segment. Automatic snapshotting pauses after an eviction because eviction is intentionally not logged; the retained history is then required to make evicted live entries reappear. Clean shutdown reconstructs the durable image from that retained history before installing its mandatory final snapshot, so an evicted live entry still reappears when the store is reopened with a larger capacity.
 
 ## Observability
 
@@ -119,6 +119,7 @@ go test -race ./...
 ## Status
 
 The durable store, lifetime and capacity management, segmented log, snapshots, graceful shutdown, terminal REPL, load generator, crash suite, and contention benchmarks are implemented:
+
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them
 - [`docs/on-disk-format.md`](docs/on-disk-format.md) — the byte-level contract
