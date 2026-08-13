@@ -1,11 +1,17 @@
-# Domain vocabulary
+# go-systems
 
-What you need in order to steer work on this solution. Each module README states the problem and the Go internals that module exercises.
+A collection of independent Go programs, each a standalone systems component. The solution has no shared runtime and no shared code — only shared vocabulary.
 
-| Domain | What to understand | Where it shows up |
-| --- | --- | --- |
-| Goroutine scheduler (GMP) | How M OS threads map to G goroutines via P logical processors; why blocking I/O does not stall OS threads | `proxy/`, `queue/` |
-| Channels vs mutexes | Share memory by communicating (channels) vs communicate by sharing memory (`RWMutex`, `atomic`) | `cache/`, `queue/` |
-| Memory allocation | Stack vs heap, escape analysis, GC pause times | `cache/`, `resp/` |
-| Streaming and interfaces | `io.Reader` / `io.Writer` as the I/O backbone, without inheritance | `resp/` |
-| Context cancellation | Tree-like cancellation: timeouts, deadlines, and signals across calls | `cache/`, `proxy/` |
+## Language
+
+**Module**:
+One of the five top-level components (`cache`, `proxy`, `resp`, `queue`, `sysmon`). Each is a self-contained Go module with its own README, glossary, and decisions.
+_Avoid_: Project, app, service, package
+
+**Independence**:
+The rule that no module imports, links to, or assumes the presence of another. Two modules solving overlapping problems is intended, not duplication to be factored out.
+_Avoid_: Decoupling, isolation
+
+**Working target**:
+The module a task is scoped to. Instructions, vocabulary, and decisions are resolved against the working target first, and only then against the solution root.
+_Avoid_: Context, scope, workspace
