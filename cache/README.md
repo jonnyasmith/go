@@ -1,12 +1,11 @@
 # cache
 
-An embeddable key-value store for Go. A map that expires entries, respects a memory ceiling, and survives the process restarting.
+An embeddable key-value store for Go. The durable map core survives process restart; expiry and memory-capacity work remain planned.
 
-> **Status: not implemented.** The API and behaviour below are the specification the module is being built to, not a description of working code. See [Status](#status).
+> **Status:** `Open`, the map operations, write-ahead log recovery, synchronization, statistics, and load-mode command are implemented. TTL, capacity eviction, sweeping, and snapshots remain specified but are not yet implemented.
 
 ```go
 c, err := cache.Open(ctx, "/var/lib/myapp/cache",
-    cache.WithCapacity(512<<20),
     cache.WithFlushInterval(time.Second),
 )
 if err != nil {
@@ -14,7 +13,7 @@ if err != nil {
 }
 defer c.Close()
 
-if err := c.SetTTL("user:42", payload, 5*time.Minute); err != nil {
+if err := c.Set("user:42", payload); err != nil {
     return err
 }
 
@@ -68,16 +67,16 @@ A store directory is owned by exactly one process, enforced by a lock file. Two 
 
 Options are passed to `Open` and validated there; an invalid value fails immediately with an error naming the option.
 
-| Option | Controls |
-| --- | --- |
-| `WithCapacity` | Byte ceiling across the store — key, value, and per-entry overhead |
-| `WithShards` | Shard count, a power of two; defaults to logical CPUs rounded up |
-| `WithFlushInterval` | The durability window |
-| `WithSweepInterval` | How often expired entries are reclaimed |
-| `WithSegmentSize` | When the log rolls to a new file |
-| `WithLogger` | A `*slog.Logger`; silent by default |
+| Option | Controls | Status |
+| --- | --- | --- |
+| `WithShards` | Shard count, a power of two; defaults to `GOMAXPROCS` rounded up | Implemented |
+| `WithFlushInterval` | The durability window | Implemented |
+| `WithSegmentSize` | When the log rolls to a new file | Implemented |
+| `WithCapacity` | Byte ceiling across the store — key, value, and per-entry overhead | Planned |
+| `WithSweepInterval` | How often expired entries are reclaimed | Planned |
+| `WithLogger` | A `*slog.Logger`; silent by default | Implemented |
 
-Capacity and shard count may both be changed between runs without losing data. A changed shard count discards the snapshot and replays the log instead, which costs a slower start and nothing else.
+When capacity and snapshots are implemented, capacity and shard count may both be changed between runs without losing data. A changed shard count will discard the snapshot and replay the log instead, costing a slower start and nothing else.
 
 ## Observability
 
@@ -93,7 +92,7 @@ The byte-level layout is specified in [docs/on-disk-format.md](docs/on-disk-form
 
 ## Command
 
-`cmd/cached` is a demonstration, not a server. It offers a terminal REPL over the store and a load mode that drives a configurable read/write mix, so shutdown, expiry, and eviction can be watched happening. It has no listener and speaks no protocol.
+`cmd/cached load -dir DIRECTORY` drives concurrent-safe durable writes until it is interrupted or killed. It is used by the crash-injection test. The terminal REPL and configurable read/write mix are planned.
 
 ## Dependencies
 
@@ -112,7 +111,7 @@ go test -race ./...
 
 ## Status
 
-Not implemented. Design is settled and recorded:
+The durable-store scope is implemented. TTL expiry, capacity and LRU eviction, background sweeping, and snapshots remain planned:
 
 - [`docs/agents/domain.md`](docs/agents/domain.md) — vocabulary
 - [`docs/adr/`](docs/adr/) — decisions and the reasoning behind them

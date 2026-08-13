@@ -20,8 +20,8 @@ A segment begins with a header and holds records until it exceeds the segment si
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| magic | `[4]byte` | identifies a log segment |
-| version | `uint16` | a version above what the binary knows is fatal |
+| magic | `[4]byte` | `CWAL`, identifying a log segment |
+| version | `uint16` | `1`; a version above what the binary knows is fatal |
 | flags | `uint16` | reserved, zero |
 
 ### Record
@@ -30,7 +30,7 @@ A segment begins with a header and holds records until it exceeds the segment si
 | --- | --- | --- |
 | length | `uint32` | byte count of everything after this field |
 | crc | `uint32` | CRC32C (Castagnoli) over everything after this field |
-| op | `uint8` | closed enum: set, delete |
+| op | `uint8` | closed enum: `1` set, `2` delete |
 | keyLen | `uint16` | |
 | deadline | `int64` | absolute Unix nanoseconds; `0` means no deadline |
 | seq | `uint64` | monotonic across the whole log |
