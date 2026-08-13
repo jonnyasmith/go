@@ -1,0 +1,58 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+/bin/
+/dist/
+/out/
+
+# Built module binaries (names match the directories)
+/cache/cache
+/proxy/proxy
+/resp/resp
+/queue/queue
+/sysmon/sysmon
+
+# Coverage and profiles
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+*.prof
+
+# Go workspace (this repo is not a workspace yet)
+go.work
+go.work.sum
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Local notes (keep on disk, do not commit)
+/plan.md
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*~
+.nfs*
+
+# Editors (keep .vscode/ settings that are committed)
+.idea/
+*.swp
+*.swo
+
+# Debug / local
+debug
+__debug_bin*
+*.log
+tmp/
+temp/

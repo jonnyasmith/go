@@ -1,0 +1,31 @@
+# Normalize text to LF in the repo. Checkout stays LF on every OS
+# (Windows, macOS, Linux) so Go, shells, and CI see the same files.
+* text=auto eol=lf
+
+*.go     text eol=lf
+*.mod    text eol=lf
+*.sum    text eol=lf
+*.md     text eol=lf
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.toml   text eol=lf
+*.proto  text eol=lf
+*.sh     text eol=lf
+
+# Windows scripts keep CRLF
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+
+# Binaries
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.dylib  binary
+*.wasm   binary
