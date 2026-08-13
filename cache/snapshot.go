@@ -31,13 +31,18 @@ type snapshotFile struct {
 }
 
 func (store *Store) startSnapshot(log *logState) bool {
-	if !store.snapshotRunning.CompareAndSwap(false, true) {
+	if store.stats.lastError.Load() != nil || !store.snapshotRunning.CompareAndSwap(false, true) {
 		return false
 	}
 	store.evictionInterlock.Lock()
 	evictionGeneration := store.evictionGeneration
 	store.snapshotWG.Add(1)
 	store.evictionInterlock.Unlock()
+	abort := func() bool {
+		store.snapshotWG.Done()
+		store.snapshotRunning.Store(false)
+		return false
+	}
 
 	write := func() error {
 		return store.writeSnapshotAt(evictionGeneration)
@@ -45,15 +50,11 @@ func (store *Store) startSnapshot(log *logState) bool {
 	if evictionGeneration != 0 {
 		through := log.seq
 		if through == maxSequence {
-			store.snapshotWG.Done()
-			store.snapshotRunning.Store(false)
-			return false
+			return abort()
 		}
 		if err := store.rollSegment(log, through+1); err != nil {
-			store.snapshotWG.Done()
-			store.snapshotRunning.Store(false)
 			store.latch(err)
-			return false
+			return abort()
 		}
 		write = func() error {
 			return store.writeDurableSnapshot(through)
@@ -68,9 +69,7 @@ func (store *Store) startSnapshot(log *logState) bool {
 			if store.logger != nil {
 				store.logger.Error("write automatic snapshot", "error", err)
 			}
-			return
 		}
-		store.stats.lastSnapshotError.Store(nil)
 	}()
 	return true
 }
@@ -168,10 +167,19 @@ func (store *Store) writeSnapshotAt(evictionGeneration uint64) error {
 }
 
 func (store *Store) writeDurableSnapshot(through uint64) error {
+	return store.writeReconstructedSnapshot(func(recovered *Store) error {
+		if err := recoverDurableImage(context.Background(), recovered, through); err != nil {
+			return fmt.Errorf("cache: reconstruct durable image through sequence %d: %w", through, err)
+		}
+		return nil
+	})
+}
+
+func (store *Store) writeReconstructedSnapshot(reconstruct func(*Store) error) error {
 	recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
 	recovered.directorySync = store.directorySync
-	if err := recoverDurableImage(context.Background(), recovered, through); err != nil {
-		return fmt.Errorf("cache: reconstruct durable image through sequence %d: %w", through, err)
+	if err := reconstruct(recovered); err != nil {
+		return err
 	}
 	if err := recovered.writeSnapshot(); err != nil {
 		return err
@@ -188,19 +196,16 @@ func (store *Store) writeFinalSnapshot() error {
 		return store.writeSnapshotAt(evictionGeneration)
 	}
 
-	recovered := newStoreState(store.dir, store.logger, len(store.shards), store.shards[0].capacity, nil)
-	log, err := recoverLog(context.Background(), recovered)
-	if err != nil {
-		return fmt.Errorf("cache: prepare final snapshot: %w", err)
-	}
-	if err := log.file.Close(); err != nil {
-		return fmt.Errorf("cache: close final snapshot recovery log %q: %w", log.file.Name(), err)
-	}
-	if err := recovered.writeSnapshot(); err != nil {
-		return err
-	}
-	store.stats.snapshots.Add(1)
-	return nil
+	return store.writeReconstructedSnapshot(func(recovered *Store) error {
+		log, err := recoverLog(context.Background(), recovered)
+		if err != nil {
+			return fmt.Errorf("cache: prepare final snapshot: %w", err)
+		}
+		if err := log.file.Close(); err != nil {
+			return fmt.Errorf("cache: close final snapshot recovery log %q: %w", log.file.Name(), err)
+		}
+		return nil
+	})
 }
 
 func encodeSnapshotEntry(current *entry) []byte {

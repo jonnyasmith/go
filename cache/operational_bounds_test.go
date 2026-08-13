@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,36 +13,51 @@ import (
 )
 
 func TestOversizedEntriesAreRejectedBeforeSubmission(t *testing.T) {
-	const (
-		shards        = 4
-		shardCapacity = uint64(80)
-	)
-	store, err := Open(context.Background(), t.TempDir(), WithShards(shards), WithCapacity(shards*shardCapacity))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	if err := store.Set("k", []byte(strings.Repeat("v", 15))); err != nil {
-		t.Fatalf("set exactly fitting entry: %v", err)
-	}
-	before := store.Stats()
-	beforeBytes := store.Bytes()
-	beforeLen := store.Len()
-
-	for name, set := range map[string]func() error{
-		"Set":    func() error { return store.Set("x", []byte(strings.Repeat("v", 16))) },
-		"SetTTL": func() error { return store.SetTTL("x", []byte(strings.Repeat("v", 16)), time.Minute) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			if err := set(); err == nil || !strings.Contains(err.Error(), "target shard capacity") {
-				t.Fatalf("oversized entry error = %v; want target shard capacity error", err)
+	for _, shardCapacity := range []uint64{80, 257} {
+		t.Run(fmt.Sprintf("capacity-%d", shardCapacity), func(t *testing.T) {
+			const shards = 4
+			dir := t.TempDir()
+			store, err := Open(context.Background(), dir, WithShards(shards), WithCapacity(shards*shardCapacity))
+			if err != nil {
+				t.Fatalf("open: %v", err)
 			}
-			if got := store.Stats(); got != before {
-				t.Fatalf("stats after rejection = %+v; want %+v", got, before)
+			t.Cleanup(func() { _ = store.Close() })
+
+			exactValueLength := int(shardCapacity - entryOverhead - 1)
+			if err := store.Set("k", []byte(strings.Repeat("v", exactValueLength))); err != nil {
+				t.Fatalf("set exactly fitting entry: %v", err)
 			}
-			if store.Bytes() != beforeBytes || store.Len() != beforeLen {
-				t.Fatalf("size after rejection = %d entries, %d bytes; want %d, %d", store.Len(), store.Bytes(), beforeLen, beforeBytes)
+			before := store.Stats()
+			beforeBytes := store.Bytes()
+			beforeLen := store.Len()
+			segment := filepath.Join(dir, segmentName(1))
+			beforeInfo, err := os.Stat(segment)
+			if err != nil {
+				t.Fatalf("stat WAL before rejection: %v", err)
+			}
+
+			for name, set := range map[string]func() error{
+				"Set":    func() error { return store.Set("x", []byte(strings.Repeat("v", exactValueLength+1))) },
+				"SetTTL": func() error { return store.SetTTL("x", []byte(strings.Repeat("v", exactValueLength+1)), time.Minute) },
+			} {
+				t.Run(name, func(t *testing.T) {
+					if err := set(); err == nil || !strings.Contains(err.Error(), "target shard capacity") {
+						t.Fatalf("oversized entry error = %v; want target shard capacity error", err)
+					}
+					if got := store.Stats(); got != before {
+						t.Fatalf("stats after rejection = %+v; want %+v", got, before)
+					}
+					if store.Bytes() != beforeBytes || store.Len() != beforeLen {
+						t.Fatalf("size after rejection = %d entries, %d bytes; want %d, %d", store.Len(), store.Bytes(), beforeLen, beforeBytes)
+					}
+					afterInfo, statErr := os.Stat(segment)
+					if statErr != nil {
+						t.Fatalf("stat WAL after rejection: %v", statErr)
+					}
+					if afterInfo.Size() != beforeInfo.Size() {
+						t.Fatalf("WAL size after rejection = %d; want %d", afterInfo.Size(), beforeInfo.Size())
+					}
+				})
 			}
 		})
 	}

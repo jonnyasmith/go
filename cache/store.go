@@ -78,17 +78,18 @@ type Store struct {
 	bytes     atomic.Int64
 	stats     counters
 
-	stateMu            sync.RWMutex
-	closed             bool
-	closeOnce          sync.Once
-	closeDone          chan struct{}
-	closeErr           error
-	requests           chan *writeRequest
-	done               chan struct{}
-	flushStop          chan struct{}
-	flushDone          chan struct{}
-	sweepStop          chan struct{}
-	sweepDone          chan struct{}
+	stateMu   sync.RWMutex
+	closed    bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
+	requests  chan *writeRequest
+	done      chan struct{}
+	flushStop chan struct{}
+	flushDone chan struct{}
+	sweepStop chan struct{}
+	sweepDone chan struct{}
+
 	logSequence        atomic.Uint64
 	snapshotRunning    atomic.Bool
 	snapshotWG         sync.WaitGroup
