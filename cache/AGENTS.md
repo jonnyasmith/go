@@ -32,3 +32,15 @@ go test ./...
 go test -fuzz=<target> -fuzztime=<duration>
 go test -bench=. -benchmem ./...
 ```
+
+Before merging, scan reachable code for known vulnerabilities with the official Go vulnerability scanner:
+
+```sh
+govulncheck ./...
+```
+
+Install or update the scanner outside the module dependency graph:
+
+```sh
+go install golang.org/x/vuln/cmd/govulncheck@latest
+```
